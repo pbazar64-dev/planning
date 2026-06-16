@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Планировщик — Битрикс24</title>
+  <!-- BX24 JS SDK: авторизация и REST внутри портала Битрикс24 -->
+  <script src="//api.bitrix24.com/api/v1/"></script>
+  <link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+  <header class="app-header">
+    <div class="app-header__left">
+      <div class="app-header__title">📅 Планировщик</div>
+      <div class="app-header__nav">
+        <button id="nav-prev" class="nav-btn" title="Предыдущая неделя">‹</button>
+        <button id="nav-today" class="nav-btn nav-btn--text" title="Текущая неделя">Сегодня</button>
+        <button id="nav-next" class="nav-btn" title="Следующая неделя">›</button>
+        <div id="week-label" class="app-header__week"></div>
+      </div>
+    </div>
+    <div class="app-header__right">
+      <div id="emp-picker" class="app-header__picker"></div>
+      <button id="btn-settings" class="icon-btn" title="Настройки">⚙</button>
+    </div>
+    <div class="app-header__progress"></div>
+  </header>
+
+  <main id="calendar" class="calendar"></main>
+
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
