@@ -119,7 +119,7 @@ export function openSettings() {
       loading.textContent = 'Загрузка сотрудников портала…';
       bodyWrap.appendChild(loading);
       try {
-        state.allUsers = await loadUsers();
+        state.allUsers = await withTimeout(loadUsers(), 15000);
         emit(); // обновить подпись мультиселекта в шапке
       } catch (e) {
         renderError(e);
@@ -243,6 +243,20 @@ function buildCheckboxPanel({ getSelected, onChange, embedded }) {
   panel.refresh = render;
   render();
   return panel;
+}
+
+// Ограничиваем ожидание ответа портала: если BX24 SDK не инициализирован
+// (например, приложение открыто вне портала Битрикс24), колбэк user.get может
+// не сработать никогда — тогда показываем понятную ошибку вместо «вечной»
+// загрузки.
+function withTimeout(promise, ms) {
+  let timer;
+  const guard = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(
+      'портал не ответил за ' + Math.round(ms / 1000) +
+      ' с. Убедитесь, что приложение открыто внутри Битрикс24, и повторите.')), ms);
+  });
+  return Promise.race([promise, guard]).finally(() => clearTimeout(timer));
 }
 
 function escapeHtml(s) {
