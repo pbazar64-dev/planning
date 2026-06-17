@@ -259,8 +259,10 @@ function withTimeout(promise, ms) {
   let timer;
   const guard = new Promise((_, reject) => {
     timer = setTimeout(() => reject(new Error(
-      'портал не ответил за ' + Math.round(ms / 1000) +
-      ' с. Убедитесь, что приложение открыто внутри Битрикс24, и повторите.')), ms);
+      'портал не ответил за ' + Math.round(ms / 1000) + ' с. ' +
+      'Если приложение открыто внутри Битрикс24, скорее всего у него нет ' +
+      'права «Пользователи (user)» — добавьте этот scope в настройках ' +
+      'приложения и переустановите его. Затем повторите.')), ms);
   });
   return Promise.race([promise, guard]).finally(() => clearTimeout(timer));
 }
