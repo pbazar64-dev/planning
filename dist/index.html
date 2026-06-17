@@ -1,0 +1,2216 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Планировщик — Битрикс24</title>
+  <!-- BX24 JS SDK: авторизация и REST внутри портала Битрикс24 -->
+  <script src="//api.bitrix24.com/api/v1/"></script>
+  <style>
+/* Планировщик для Битрикс24 — минималистичный Material-стиль. */
+
+:root {
+  --c-task-bg: #BBDEFB;   --c-task-br: #64B5F6;
+  --c-event-bg: #C8E6C9;  --c-event-br: #81C784;
+  --c-absence-bg: #E0E0E0;--c-absence-br: #BDBDBD;
+  --c-primary: #2196F3;
+  --c-text: #212121;      --c-muted: #757575;
+  --c-line: #E0E0E0;      --c-line-strong: #BDBDBD;
+  --c-bg: #FAFAFA;        --c-surface: #FFFFFF;
+  --header-h: 56px;
+  --day-head-h: 34px;
+  --sub-head-h: 26px;
+  --shadow: 0 2px 8px rgba(0,0,0,.12);
+  --shadow-lg: 0 8px 28px rgba(0,0,0,.20);
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0; height: 100%;
+  font-family: -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+  color: var(--c-text); background: var(--c-bg);
+  font-size: 14px;
+}
+
+/* --- Шапка --------------------------------------------------------------- */
+
+.app-header {
+  position: relative;
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 16px; height: var(--header-h);
+  padding: 0 16px;
+  background: var(--c-surface);
+  border-bottom: 1px solid var(--c-line);
+  box-shadow: 0 1px 3px rgba(0,0,0,.08);
+  z-index: 20;
+}
+.app-header__left, .app-header__right { display: flex; align-items: center; gap: 14px; }
+.app-header__title { font-weight: 600; font-size: 16px; white-space: nowrap; }
+.app-header__nav { display: flex; align-items: center; gap: 6px; }
+.app-header__week { font-weight: 500; color: var(--c-muted); margin-left: 8px; white-space: nowrap; }
+
+.nav-btn {
+  border: 1px solid var(--c-line); background: var(--c-surface);
+  border-radius: 8px; cursor: pointer; font-size: 18px; line-height: 1;
+  width: 32px; height: 32px; color: var(--c-text);
+  display: inline-flex; align-items: center; justify-content: center;
+  transition: background .15s;
+}
+.nav-btn--text { width: auto; padding: 0 12px; font-size: 13px; }
+.nav-btn:hover { background: #F0F0F0; }
+
+.icon-btn {
+  border: 1px solid var(--c-line); background: var(--c-surface);
+  border-radius: 8px; cursor: pointer; font-size: 18px;
+  width: 36px; height: 36px;
+  display: inline-flex; align-items: center; justify-content: center;
+  transition: background .15s;
+}
+.icon-btn:hover { background: #F0F0F0; }
+
+.app-header__progress {
+  position: absolute; left: 0; bottom: -1px; height: 3px; width: 0;
+  background: var(--c-primary); transition: width .3s ease;
+}
+body.is-loading .app-header__progress {
+  width: 100%;
+  animation: progress 1.2s ease-in-out infinite;
+}
+@keyframes progress {
+  0% { width: 0; opacity: 1; } 50% { width: 70%; } 100% { width: 100%; opacity: .3; }
+}
+
+/* --- Мультиселект сотрудников ------------------------------------------- */
+
+.emp-picker { position: relative; }
+.emp-picker__button {
+  display: inline-flex; align-items: center; gap: 8px;
+  max-width: 360px; height: 36px; padding: 0 12px;
+  border: 1px solid var(--c-line); border-radius: 8px;
+  background: var(--c-surface); cursor: pointer; font-size: 13px;
+}
+.emp-picker__label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.emp-picker__caret { color: var(--c-muted); }
+.emp-picker__panel {
+  position: absolute; right: 0; top: calc(100% + 6px);
+  width: 320px; background: var(--c-surface);
+  border: 1px solid var(--c-line); border-radius: 10px;
+  box-shadow: var(--shadow-lg); z-index: 30; padding: 10px;
+}
+
+.emp-panel--embedded { margin-top: 10px; }
+.emp-panel__search {
+  width: 100%; height: 34px; padding: 0 10px; margin-bottom: 8px;
+  border: 1px solid var(--c-line); border-radius: 8px; font-size: 13px;
+}
+.emp-panel__counter { font-size: 12px; color: var(--c-muted); margin-bottom: 6px; }
+.emp-panel__list { max-height: 320px; overflow-y: auto; }
+.emp-panel__empty { color: var(--c-muted); padding: 10px; text-align: center; }
+
+.emp-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 7px 6px; border-radius: 8px; cursor: pointer;
+}
+.emp-row:hover { background: #F5F5F5; }
+.emp-row--disabled { opacity: .45; cursor: not-allowed; }
+.emp-row input { width: 16px; height: 16px; }
+.emp-row__name { font-size: 13px; }
+.emp-row__pos { font-size: 11px; color: var(--c-muted); }
+
+/* --- Календарь ----------------------------------------------------------- */
+
+.calendar { height: calc(100vh - var(--header-h)); overflow: hidden; }
+.cal-scroll-y { height: 100%; overflow: auto; }
+.cal-grid { display: flex; width: max-content; min-width: 100%; }
+
+.cal-empty {
+  height: 100%; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 8px; color: var(--c-muted);
+}
+.cal-empty__icon { font-size: 48px; }
+.cal-empty__text { font-size: 18px; font-weight: 500; color: var(--c-text); }
+.cal-empty__hint { font-size: 13px; }
+
+/* Временная шкала слева */
+.cal-time {
+  position: sticky; left: 0; z-index: 6;
+  width: 64px; flex: 0 0 64px; background: var(--c-surface);
+  border-right: 1px solid var(--c-line-strong);
+}
+.cal-time__header {
+  height: calc(var(--day-head-h) + var(--sub-head-h));
+  position: sticky; top: 0; z-index: 7; background: var(--c-surface);
+  border-bottom: 1px solid var(--c-line-strong);
+}
+.cal-time__slot {
+  position: relative; border-bottom: 1px dashed var(--c-line);
+  font-size: 11px; color: var(--c-muted); text-align: right;
+  padding-right: 6px;
+}
+.cal-time__slot--hour { color: var(--c-text); border-bottom: 1px solid var(--c-line-strong); }
+
+/* Колонка дня */
+.cal-day {
+  flex: 1 0 auto; min-width: 180px;
+  border-right: 1px solid var(--c-line-strong);
+}
+.cal-day--today { background: rgba(33,150,243,.03); }
+.cal-day__header {
+  position: sticky; top: 0; z-index: 5;
+  height: var(--day-head-h); line-height: var(--day-head-h);
+  text-align: center; font-weight: 600; font-size: 13px;
+  background: var(--c-surface); border-bottom: 1px solid var(--c-line);
+}
+.cal-day--today .cal-day__header { color: var(--c-primary); }
+.cal-day__sub {
+  position: sticky; top: var(--day-head-h); z-index: 4;
+  display: flex; height: var(--sub-head-h);
+  background: var(--c-surface); border-bottom: 1px solid var(--c-line-strong);
+}
+.cal-day__sub-cell {
+  flex: 1 1 0; min-width: 0;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 11px; color: var(--c-muted);
+  border-left: 1px solid var(--c-line); overflow: hidden;
+  white-space: nowrap; text-overflow: ellipsis; padding: 0 4px;
+}
+.cal-day__sub-cell:first-child { border-left: none; }
+
+.cal-day__body { display: flex; }
+.cal-subcol {
+  position: relative; flex: 1 1 0; min-width: 0;
+  border-left: 1px solid var(--c-line);
+}
+.cal-subcol:first-child { border-left: none; }
+
+.cal-slot { border-bottom: 1px dashed var(--c-line); cursor: pointer; }
+.cal-slot:nth-child(2n) { border-bottom: 1px solid var(--c-line); }
+.cal-slot:hover { background: rgba(33,150,243,.06); }
+
+/* Блок сущности */
+.cal-block {
+  position: absolute; z-index: 2;
+  border: 1px solid; border-left-width: 3px; border-radius: 5px;
+  padding: 3px 5px; overflow: hidden; cursor: pointer;
+  box-shadow: 0 1px 2px rgba(0,0,0,.10); font-size: 12px;
+}
+.cal-block:hover { box-shadow: var(--shadow); z-index: 3; }
+.cal-block--edge { opacity: .9; }
+.cal-block__content { display: flex; flex-direction: column; gap: 2px; height: 100%; }
+.cal-block__title {
+  font-weight: 600; line-height: 1.15;
+  overflow: hidden; text-overflow: ellipsis;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+}
+.cal-block__meta {
+  display: flex; align-items: center; gap: 5px;
+  font-size: 11px; color: #37474F; margin-top: auto;
+}
+.cal-block__hours { font-variant-numeric: tabular-nums; font-weight: 600; }
+.cal-block__status { font-size: 12px; }
+
+.cal-block__edit {
+  position: absolute; top: 2px; right: 2px;
+  width: 20px; height: 20px; border: none; border-radius: 5px;
+  background: rgba(255,255,255,.85); cursor: pointer; font-size: 12px;
+  display: none; align-items: center; justify-content: center;
+}
+.cal-block:hover .cal-block__edit { display: inline-flex; }
+.cal-block__edit:hover { background: #fff; }
+
+.cal-block__edge {
+  position: absolute; left: 0; right: 0;
+  font-size: 9px; text-align: center; color: #455A64;
+  background: rgba(0,0,0,.10); line-height: 12px; height: 12px;
+}
+.cal-block__edge--top { top: 0; }
+.cal-block__edge--bottom { bottom: 0; }
+
+/* --- Тултип -------------------------------------------------------------- */
+
+.tooltip {
+  position: fixed; z-index: 1000; max-width: 320px;
+  background: #263238; color: #fff; border-radius: 8px;
+  padding: 10px 12px; font-size: 12px; line-height: 1.45;
+  box-shadow: var(--shadow-lg); pointer-events: none;
+  opacity: 0; visibility: hidden; transition: opacity .12s;
+}
+.tooltip--visible { opacity: 1; visibility: visible; }
+.tooltip__title { font-weight: 600; font-size: 13px; margin-bottom: 4px; }
+.tooltip__row { margin-top: 2px; }
+.tooltip__row b { color: #B0BEC5; font-weight: 500; }
+.tooltip__desc { margin-top: 6px; color: #CFD8DC; border-top: 1px solid #37474F; padding-top: 6px; }
+
+/* --- Модальные окна ------------------------------------------------------ */
+
+.modal-overlay {
+  position: fixed; inset: 0; z-index: 100;
+  background: rgba(0,0,0,.40);
+  display: flex; align-items: center; justify-content: center; padding: 16px;
+}
+.modal {
+  width: 100%; background: var(--c-surface);
+  border-radius: 12px; box-shadow: var(--shadow-lg);
+  max-height: 90vh; overflow: hidden; display: flex; flex-direction: column;
+}
+.modal__head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 14px 16px; border-bottom: 1px solid var(--c-line);
+}
+.modal__title { font-weight: 600; font-size: 15px; }
+.modal__close {
+  border: none; background: none; cursor: pointer; font-size: 22px;
+  line-height: 1; color: var(--c-muted);
+}
+.modal__close:hover { color: var(--c-text); }
+.modal__body { padding: 16px; overflow-y: auto; }
+.modal__footer {
+  display: flex; justify-content: flex-end; gap: 8px;
+  margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--c-line);
+}
+
+.btn {
+  border: 1px solid transparent; border-radius: 8px; cursor: pointer;
+  font-size: 13px; padding: 9px 16px; font-weight: 500;
+}
+.btn--primary { background: var(--c-primary); color: #fff; }
+.btn--primary:hover { background: #1E88E5; }
+.btn--primary:disabled { opacity: .6; cursor: default; }
+.btn--ghost { background: var(--c-surface); border-color: var(--c-line); color: var(--c-text); }
+.btn--ghost:hover { background: #F5F5F5; }
+
+.form__row { display: block; margin-bottom: 12px; }
+.form__label { display: block; font-size: 12px; color: var(--c-muted); margin-bottom: 4px; }
+.form__input {
+  width: 100%; height: 38px; padding: 0 10px;
+  border: 1px solid var(--c-line); border-radius: 8px; font-size: 14px;
+  font-family: inherit;
+}
+.form__textarea { height: auto; padding: 8px 10px; resize: vertical; }
+.form__input:focus { outline: none; border-color: var(--c-primary); }
+.form__meta {
+  font-size: 13px; color: var(--c-muted);
+  background: #F5F5F5; padding: 8px 10px; border-radius: 8px; margin-bottom: 12px;
+}
+.form__loading { padding: 20px; text-align: center; color: var(--c-muted); }
+
+/* Меню слота */
+.slot-menu { display: flex; flex-direction: column; gap: 8px; }
+.slot-menu__hint { font-size: 12px; color: var(--c-muted); margin-bottom: 4px; }
+.slot-menu__item {
+  text-align: left; border: 1px solid var(--c-line); background: var(--c-surface);
+  border-radius: 8px; padding: 12px 14px; cursor: pointer; font-size: 14px;
+}
+.slot-menu__item:hover { background: #F0F7FF; border-color: var(--c-primary); }
+
+/* Список выбора задач */
+.pick-list { max-height: 360px; overflow-y: auto; margin-top: 4px; }
+.pick-list__item {
+  display: block; width: 100%; text-align: left;
+  border: none; border-bottom: 1px solid var(--c-line);
+  background: none; padding: 10px 8px; cursor: pointer; font-size: 13px;
+}
+.pick-list__item:hover { background: #F0F7FF; }
+
+/* --- Тосты --------------------------------------------------------------- */
+
+.toast-container {
+  position: fixed; right: 16px; bottom: 16px; z-index: 2000;
+  display: flex; flex-direction: column; gap: 8px;
+}
+.toast {
+  min-width: 220px; max-width: 360px; padding: 12px 14px;
+  border-radius: 8px; color: #fff; font-size: 13px; cursor: pointer;
+  box-shadow: var(--shadow-lg);
+  transform: translateY(8px); opacity: 0; transition: all .25s;
+}
+.toast--visible { transform: translateY(0); opacity: 1; }
+.toast--error { background: #E53935; }
+.toast--success { background: #43A047; }
+.toast--info { background: #455A64; }
+
+</style>
+</head>
+<body>
+  <header class="app-header">
+    <div class="app-header__left">
+      <div class="app-header__title">📅 Планировщик</div>
+      <div class="app-header__nav">
+        <button id="nav-prev" class="nav-btn" title="Предыдущая неделя">‹</button>
+        <button id="nav-today" class="nav-btn nav-btn--text" title="Текущая неделя">Сегодня</button>
+        <button id="nav-next" class="nav-btn" title="Следующая неделя">›</button>
+        <div id="week-label" class="app-header__week"></div>
+      </div>
+    </div>
+    <div class="app-header__right">
+      <div id="emp-picker" class="app-header__picker"></div>
+      <button id="btn-settings" class="icon-btn" title="Настройки">⚙</button>
+    </div>
+    <div class="app-header__progress"></div>
+  </header>
+
+  <main id="calendar" class="calendar"></main>
+
+  <script>
+(function () {
+/* Сгенерировано tools/build-singlefile.mjs — правьте исходники в js/, не этот файл. */
+
+// ===== js/config.js =====
+// Конфигурация приложения-планировщика для Битрикс24.
+//
+// Приложение встраивается в портал Битрикс24 как placement-приложение и
+// работает через BX24 JS SDK (см. js/b24.js). Авторизация выполняется самим
+// порталом в рамках iframe — отдельный ключ при этом не требуется.
+//
+// Если же вы хотите запускать приложение как standalone и обращаться к шлюзу
+// vibecode (https://vibecode.bitrix24.tech), включите режим GATEWAY ниже и
+// укажите ключ. Весь сетевой контракт шлюза сосредоточен в js/b24.js, чтобы
+// при необходимости его было легко поправить в одном месте.
+
+const CONFIG = {
+  // 'bx24'    — встраиваемое приложение (BX24 JS SDK). Режим по умолчанию.
+  // 'gateway' — standalone-режим через шлюз vibecode с Bearer-ключом.
+  transport: 'bx24',
+
+  gateway: {
+    baseUrl: 'https://vibecode.bitrix24.tech',
+    // Ключ доступа выдаётся в портале Битрикс24 (раздел Вайбкод).
+    // ВНИМАНИЕ: это секрет — не публикуйте его в открытых репозиториях.
+    accessKey: 'vibe_app_local_6a31460e09cd47_92314079_Ly1fiSDLl3I0qXAlchUuD37a0a7kTtPnNtrp0yj6rmO7ZvuT2i_e30907',
+    callPath: '/v1/call',   // POST { method, params } -> { result, error, ... }
+    batchPath: '/v1/batch', // POST { halt, cmd } -> { result, error, ... }
+  },
+
+  // Сетевые повторы при временных сбоях.
+  retry: {
+    attempts: 4,
+    backoffMs: [2000, 4000, 8000, 16000],
+  },
+};
+
+// Параметры сетки календаря.
+const GRID = {
+  workStartHour: 8,   // начало рабочей сетки
+  workEndHour: 18,    // конец рабочей сетки
+  slotMinutes: 30,    // шаг планирования
+  slotHeightPx: 50,   // высота 30-минутного слота
+  daysPerWeek: 5,     // ПН–ПТ
+  maxEmployees: 5,    // максимум одновременно выбранных сотрудников
+};
+
+// Ключи для хранения настроек приложения (на стороне портала Битрикс24).
+const OPTION_KEYS = {
+  selectedUsers: 'planner_selected_users',
+};
+
+// Цветовая схема сущностей.
+const COLORS = {
+  task: { bg: '#BBDEFB', border: '#64B5F6' },
+  event: { bg: '#C8E6C9', border: '#81C784' },
+  absence: { bg: '#E0E0E0', border: '#BDBDBD' },
+};
+
+// Статусы задач Битрикс24 (tasks.task STATUS) -> человекочитаемое + иконка.
+// 2 — ждёт выполнения, 3 — выполняется, 4 — почти завершена, 5 — завершена,
+// 6 — отложена, 7 — отклонена. «Просрочена» вычисляется по дедлайну.
+const TASK_STATUS = {
+  pending:   { code: 2, label: 'Ждёт выполнения', icon: '⏳' },
+  inProgress:{ code: 3, label: 'Выполняется',     icon: '▶' },
+  deferred:  { code: 6, label: 'Отложена',         icon: '⏸' },
+  completed: { code: 5, label: 'Завершена',        icon: '✓' },
+  overdue:   { code: -1, label: 'Просрочена',      icon: '⚠' },
+};
+
+
+// ===== js/dates.js =====
+// Утилиты для работы с датами и временем. Неделя начинается с понедельника.
+
+
+const WEEKDAYS_SHORT = ['ВС', 'ПН', 'ВТ', 'СР', 'ЧТ', 'ПТ', 'СБ'];
+const MONTHS_GEN = [
+  'января', 'февраля', 'марта', 'апреля', 'мая', 'июня',
+  'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря',
+];
+
+const MS_PER_DAY = 24 * 60 * 60 * 1000;
+
+function startOfDay(date) {
+  const d = new Date(date);
+  d.setHours(0, 0, 0, 0);
+  return d;
+}
+
+// Понедельник недели, которой принадлежит date.
+function startOfWeek(date) {
+  const d = startOfDay(date);
+  const day = d.getDay(); // 0=вс ... 6=сб
+  const diff = (day === 0 ? -6 : 1 - day); // сдвиг до понедельника
+  d.setDate(d.getDate() + diff);
+  return d;
+}
+
+function addDays(date, days) {
+  const d = new Date(date);
+  d.setDate(d.getDate() + days);
+  return d;
+}
+
+function addWeeks(date, weeks) {
+  return addDays(date, weeks * 7);
+}
+
+// Массив из 5 дат (ПН–ПТ) для недели, содержащей date.
+function weekDays(date) {
+  const monday = startOfWeek(date);
+  return Array.from({ length: GRID.daysPerWeek }, (_, i) => addDays(monday, i));
+}
+
+function isSameDay(a, b) {
+  return startOfDay(a).getTime() === startOfDay(b).getTime();
+}
+
+function isToday(date) {
+  return isSameDay(date, new Date());
+}
+
+// «ПН, 15 мая»
+function formatDayLabel(date) {
+  const d = new Date(date);
+  return `${WEEKDAYS_SHORT[d.getDay()]}, ${d.getDate()} ${MONTHS_GEN[d.getMonth()]}`;
+}
+
+// «15 мая 2026» — для заголовков диапазона.
+function formatDateRu(date) {
+  const d = new Date(date);
+  return `${d.getDate()} ${MONTHS_GEN[d.getMonth()]} ${d.getFullYear()}`;
+}
+
+// «HH:MM»
+function formatTime(date) {
+  const d = new Date(date);
+  const hh = String(d.getHours()).padStart(2, '0');
+  const mm = String(d.getMinutes()).padStart(2, '0');
+  return `${hh}:${mm}`;
+}
+
+// Дата+время в формате, который ожидают REST-методы Битрикс24:
+// «YYYY-MM-DD HH:MM:SS».
+function toB24DateTime(date) {
+  const d = new Date(date);
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ` +
+         `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+
+// «YYYY-MM-DD» для значений datetime-local и сравнения дней.
+function toDateInputValue(date) {
+  const d = new Date(date);
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+// «YYYY-MM-DDTHH:MM» для input[type=datetime-local].
+function toDateTimeInputValue(date) {
+  return `${toDateInputValue(date)}T${formatTime(date)}`;
+}
+
+// Разбор значения Битрикс24 (ISO или «YYYY-MM-DD HH:MM:SS») в Date.
+function parseB24Date(value) {
+  if (!value) return null;
+  if (value instanceof Date) return value;
+  // Битрикс часто отдаёт ISO со смещением — Date справляется.
+  let d = new Date(value);
+  if (!isNaN(d)) return d;
+  // Фолбэк для «YYYY-MM-DD HH:MM:SS».
+  d = new Date(String(value).replace(' ', 'T'));
+  return isNaN(d) ? null : d;
+}
+
+// Сколько минут прошло от начала рабочей сетки (8:00) до date в этот день.
+function minutesFromGridStart(date) {
+  const d = new Date(date);
+  return (d.getHours() - GRID.workStartHour) * 60 + d.getMinutes();
+}
+
+// Секунды -> «6.5» часов (одна десятая).
+function secondsToHours(seconds) {
+  const h = (Number(seconds) || 0) / 3600;
+  return Math.round(h * 10) / 10;
+}
+
+// Дата начала и конца недели в формате Битрикс24 — для фильтров запросов.
+function weekRangeB24(date) {
+  const monday = startOfWeek(date);
+  const from = startOfDay(monday);
+  const to = addDays(from, GRID.daysPerWeek); // включительно по ПТ 23:59
+  return {
+    from: toB24DateTime(from),
+    to: toB24DateTime(new Date(to.getTime() - 1)),
+    fromDate: from,
+    toDate: new Date(to.getTime() - 1),
+  };
+}
+
+
+
+// ===== js/state.js =====
+// Центральное состояние приложения и простейшая шина событий.
+
+
+const listeners = new Set();
+
+const state = {
+  allUsers: [],          // [{id, name, position, photo}]
+  selectedUserIds: [],   // выбранные сотрудники (до 5)
+  currentWeek: startOfWeek(new Date()),
+  dataByUser: new Map(), // Map<userId, item[]>
+  loading: false,
+  error: null,
+};
+
+function subscribe(fn) {
+  listeners.add(fn);
+  return () => listeners.delete(fn);
+}
+
+function emit() {
+  for (const fn of listeners) {
+    try { fn(state); } catch (e) { console.error(e); }
+  }
+}
+
+function setSelectedUserIds(ids) {
+  state.selectedUserIds = ids.map(String).slice(0, GRID.maxEmployees);
+}
+
+function selectedUsers() {
+  const byId = new Map(state.allUsers.map((u) => [u.id, u]));
+  return state.selectedUserIds.map((id) => byId.get(id)).filter(Boolean);
+}
+
+function itemsFor(userId) {
+  return state.dataByUser.get(String(userId)) || [];
+}
+
+
+// ===== js/bus.js =====
+// Минимальная шина для действий, чтобы избежать циклических импортов.
+// app.js регистрирует здесь реальную перезагрузку недели, а модалки её зовут.
+
+const bus = {
+  reloadWeek: async () => {},
+};
+
+
+// ===== js/b24.js =====
+// Транспортный слой к Битрикс24.
+//
+// Один интерфейс — два режима:
+//   * 'bx24'    — встраиваемое приложение через глобальный BX24 JS SDK
+//                 (подключается в index.html как //api.bitrix24.com/api/v1/).
+//   * 'gateway' — standalone через REST-шлюз vibecode с Bearer-ключом.
+//
+// Наружу отдаём небольшой набор функций: init, callMethod, callListMethod,
+// callBatch, getOption, setOption. Весь специфичный для шлюза HTTP-контракт
+// сосредоточен здесь — если формат эндпоинта отличается, правится одно место.
+
+
+class B24Error extends Error {
+  constructor(message, code, raw) {
+    super(message);
+    this.name = 'B24Error';
+    this.code = code;
+    this.raw = raw;
+  }
+}
+
+const isGateway = () => CONFIG.transport === 'gateway';
+
+// --- Инициализация -------------------------------------------------------
+
+let bx24Ready = null;
+
+function init() {
+  if (isGateway()) return Promise.resolve();
+  if (bx24Ready) return bx24Ready;
+
+  bx24Ready = new Promise((resolve, reject) => {
+    if (typeof window.BX24 === 'undefined') {
+      reject(new B24Error('BX24 JS SDK не загружен. Откройте приложение внутри портала Битрикс24.'));
+      return;
+    }
+    try {
+      window.BX24.init(() => resolve());
+    } catch (e) {
+      reject(new B24Error('Не удалось инициализировать BX24: ' + e.message));
+    }
+  });
+  return bx24Ready;
+}
+
+// --- Повторные попытки при сетевых сбоях ----------------------------------
+
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+async function withRetry(fn) {
+  const { attempts, backoffMs } = CONFIG.retry;
+  let lastErr;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await fn();
+    } catch (e) {
+      lastErr = e;
+      // Повторяем только транзиентные ошибки (сеть / 5xx / лимиты).
+      if (!isTransient(e) || i === attempts - 1) throw e;
+      await sleep(backoffMs[Math.min(i, backoffMs.length - 1)]);
+    }
+  }
+  throw lastErr;
+}
+
+function isTransient(e) {
+  if (e instanceof B24Error) {
+    if (e.code === 'NETWORK') return true;
+    if (typeof e.code === 'number' && e.code >= 500) return true;
+    if (e.code === 'QUERY_LIMIT_EXCEEDED' || e.code === 'OPERATION_TIME_LIMIT') return true;
+    return false;
+  }
+  return true; // неизвестные ошибки считаем транзиентными
+}
+
+// --- Низкоуровневый вызов одного метода -----------------------------------
+
+// Возвращает «сырой» ответ: { result, total, next, error, error_description }.
+function rawCall(method, params) {
+  return isGateway() ? gatewayCall(method, params) : bx24Call(method, params);
+}
+
+function bx24Call(method, params) {
+  return new Promise((resolve, reject) => {
+    window.BX24.callMethod(method, params || {}, (res) => {
+      const err = res.error();
+      if (err) {
+        const code = (err.ex && err.ex.error) || err.error || 'ERROR';
+        const desc = (err.ex && err.ex.error_description) ||
+                     err.error_description || String(err);
+        reject(new B24Error(desc, code, err));
+        return;
+      }
+      resolve({
+        result: res.data(),
+        total: res.total ? res.total() : undefined,
+        // res.more()/res.next() обрабатываются в callListMethod
+        _res: res,
+      });
+    });
+  });
+}
+
+async function gatewayCall(method, params) {
+  const { baseUrl, callPath, accessKey } = CONFIG.gateway;
+  let resp;
+  try {
+    resp = await fetch(baseUrl + callPath, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + accessKey,
+      },
+      body: JSON.stringify({ method, params: params || {} }),
+    });
+  } catch (e) {
+    throw new B24Error('Сетевая ошибка: ' + e.message, 'NETWORK', e);
+  }
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => '');
+    throw new B24Error(`HTTP ${resp.status}: ${text || resp.statusText}`, resp.status);
+  }
+  const json = await resp.json().catch(() => ({}));
+  if (json.error) {
+    throw new B24Error(json.error_description || json.error, json.error, json);
+  }
+  return { result: json.result, total: json.total, next: json.next };
+}
+
+// Один вызов с ретраями. Возвращает result (массив/объект/значение).
+async function callMethod(method, params) {
+  const raw = await withRetry(() => rawCall(method, params));
+  return raw.result;
+}
+
+// --- Списочный вызов с прокруткой страниц ----------------------------------
+// Собирает все страницы (user.get, tasks.task.list, calendar.event.get, ...).
+
+async function callListMethod(method, params, { resultKey } = {}) {
+  if (isGateway()) return gatewayList(method, params, resultKey);
+  return bx24List(method, params, resultKey);
+}
+
+function extractItems(result, resultKey) {
+  if (resultKey && result && typeof result === 'object') return result[resultKey] || [];
+  return Array.isArray(result) ? result : (result ? [result] : []);
+}
+
+function bx24List(method, params, resultKey) {
+  return withRetry(() => new Promise((resolve, reject) => {
+    const acc = [];
+    window.BX24.callMethod(method, params || {}, function handler(res) {
+      const err = res.error();
+      if (err) {
+        const code = (err.ex && err.ex.error) || err.error || 'ERROR';
+        const desc = (err.ex && err.ex.error_description) || err.error_description || String(err);
+        reject(new B24Error(desc, code, err));
+        return;
+      }
+      acc.push(...extractItems(res.data(), resultKey));
+      if (res.more && res.more()) {
+        res.next(); // вызовет handler снова со следующей страницей
+      } else {
+        resolve(acc);
+      }
+    });
+  }));
+}
+
+async function gatewayList(method, params, resultKey) {
+  const acc = [];
+  let start = 0;
+  // Защита от бесконечного цикла.
+  for (let guard = 0; guard < 1000; guard++) {
+    const p = { ...(params || {}), start };
+    const raw = await withRetry(() => gatewayCall(method, p));
+    acc.push(...extractItems(raw.result, resultKey));
+    if (raw.next === undefined || raw.next === null) break;
+    start = raw.next;
+  }
+  return acc;
+}
+
+// --- Батч-вызовы ----------------------------------------------------------
+// calls: { key: { method, params } }. Возвращает { key: result }.
+
+async function callBatch(calls) {
+  return isGateway() ? gatewayBatch(calls) : bx24Batch(calls);
+}
+
+function bx24Batch(calls) {
+  return withRetry(() => new Promise((resolve, reject) => {
+    const payload = {};
+    for (const [key, { method, params }] of Object.entries(calls)) {
+      payload[key] = [method, params || {}];
+    }
+    window.BX24.callBatch(payload, (results) => {
+      const out = {};
+      for (const key of Object.keys(calls)) {
+        const res = results[key];
+        if (!res) { out[key] = null; continue; }
+        if (res.error && res.error()) {
+          // Не валим весь батч из-за одной ошибки — отдаём null и логируем.
+          console.warn(`Батч-вызов «${key}» завершился ошибкой:`, res.error());
+          out[key] = null;
+        } else {
+          out[key] = res.data();
+        }
+      }
+      resolve(out);
+    }, false);
+  }));
+}
+
+async function gatewayBatch(calls) {
+  const { baseUrl, batchPath, accessKey } = CONFIG.gateway;
+  const cmd = {};
+  for (const [key, { method, params }] of Object.entries(calls)) {
+    const qs = new URLSearchParams(flatten(params || {})).toString();
+    cmd[key] = `${method}?${qs}`;
+  }
+  const raw = await withRetry(async () => {
+    let resp;
+    try {
+      resp = await fetch(baseUrl + batchPath, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + accessKey },
+        body: JSON.stringify({ halt: 0, cmd }),
+      });
+    } catch (e) {
+      throw new B24Error('Сетевая ошибка: ' + e.message, 'NETWORK', e);
+    }
+    if (!resp.ok) throw new B24Error(`HTTP ${resp.status}`, resp.status);
+    return resp.json();
+  });
+  const result = (raw.result && raw.result.result) || raw.result || {};
+  return result;
+}
+
+// Плоская сериализация параметров для query-строки батча.
+function flatten(obj, prefix = '', out = {}) {
+  for (const [k, v] of Object.entries(obj)) {
+    const key = prefix ? `${prefix}[${k}]` : k;
+    if (v !== null && typeof v === 'object') flatten(v, key, out);
+    else out[key] = v;
+  }
+  return out;
+}
+
+// --- Настройки приложения (на стороне портала) ----------------------------
+// В режиме bx24 используем BX24.appOption (общие для приложения настройки).
+// В режиме gateway — REST-методы app.option.get / app.option.set.
+
+async function getOption(key, fallback = null) {
+  try {
+    if (isGateway()) {
+      const res = await callMethod('app.option.get', {});
+      const val = res && res[key];
+      return val !== undefined && val !== null ? val : fallback;
+    }
+    const val = window.BX24.appOption.get(key);
+    return val !== undefined && val !== null && val !== '' ? val : fallback;
+  } catch (e) {
+    console.warn('Не удалось прочитать настройку', key, e);
+    return fallback;
+  }
+}
+
+async function setOption(key, value) {
+  if (isGateway()) {
+    await callMethod('app.option.set', { options: { [key]: value } });
+    return;
+  }
+  await new Promise((resolve, reject) => {
+    try {
+      window.BX24.appOption.set(key, value, () => resolve());
+    } catch (e) {
+      reject(new B24Error('Не удалось сохранить настройку: ' + e.message));
+    }
+  });
+}
+
+
+
+// ===== js/data.js =====
+// Доменный слой: загрузка и сохранение сущностей Битрикс24, приведение их к
+// единой модели «item», с которой работает календарь.
+//
+// Единая модель:
+//   { id, kind: 'task'|'event'|'absence', userId,
+//     title, description, start: Date, end: Date,
+//     status, hoursFact, hoursPlan, hoursToday, allDay, raw }
+
+
+// --- Сотрудники -----------------------------------------------------------
+
+async function loadUsers() {
+  const rows = await callListMethod('user.get', {
+    sort: 'LAST_NAME',
+    order: 'ASC',
+    FILTER: { ACTIVE: true },
+  });
+  return rows
+    .filter((u) => u && u.ID)
+    .map((u) => ({
+      id: String(u.ID),
+      name: [u.LAST_NAME, u.NAME].filter(Boolean).join(' ').trim() ||
+            u.NAME || u.EMAIL || ('ID ' + u.ID),
+      position: u.WORK_POSITION || '',
+      photo: u.PERSONAL_PHOTO || '',
+    }));
+}
+
+// --- Настройки приложения -------------------------------------------------
+
+async function loadSelectedUserIds() {
+  const raw = await getOption(OPTION_KEYS.selectedUsers, '[]');
+  try {
+    const arr = JSON.parse(raw);
+    return Array.isArray(arr) ? arr.map(String).slice(0, GRID.maxEmployees) : [];
+  } catch {
+    return [];
+  }
+}
+
+async function saveSelectedUserIds(ids) {
+  const limited = ids.map(String).slice(0, GRID.maxEmployees);
+  await setOption(OPTION_KEYS.selectedUsers, JSON.stringify(limited));
+}
+
+// --- Загрузка данных недели ------------------------------------------------
+
+const TASK_SELECT = [
+  'ID', 'TITLE', 'STATUS', 'RESPONSIBLE_ID', 'DESCRIPTION',
+  'DEADLINE', 'START_DATE_PLAN', 'END_DATE_PLAN',
+  'TIME_ESTIMATE', 'TIME_SPENT_IN_LOGS',
+];
+
+// Загружает задачи, события и отсутствия для всех сотрудников за неделю.
+// Возвращает Map<userId, item[]>.
+async function loadWeekData(userIds, weekDate) {
+  const range = weekRangeB24(weekDate);
+  const byUser = new Map(userIds.map((id) => [String(id), []]));
+
+  // Формируем батч: на каждого сотрудника — задачи (по плану и по дедлайну)
+  // и события календаря.
+  const calls = {};
+  for (const id of userIds) {
+    calls[`task_plan_${id}`] = {
+      method: 'tasks.task.list',
+      params: {
+        filter: {
+          RESPONSIBLE_ID: id,
+          '>=START_DATE_PLAN': range.from,
+          '<=START_DATE_PLAN': range.to,
+        },
+        select: TASK_SELECT,
+      },
+    };
+    calls[`task_dl_${id}`] = {
+      method: 'tasks.task.list',
+      params: {
+        filter: {
+          RESPONSIBLE_ID: id,
+          '>=DEADLINE': range.from,
+          '<=DEADLINE': range.to,
+        },
+        select: TASK_SELECT,
+      },
+    };
+    calls[`events_${id}`] = {
+      method: 'calendar.event.get',
+      params: { type: 'user', ownerId: id, from: range.from, to: range.to },
+    };
+  }
+
+  const results = await callBatch(calls);
+
+  for (const id of userIds) {
+    const sid = String(id);
+    const items = byUser.get(sid);
+
+    // Задачи: объединяем два набора и убираем дубли по ID.
+    const taskMap = new Map();
+    for (const key of [`task_plan_${id}`, `task_dl_${id}`]) {
+      const res = results[key];
+      const tasks = (res && (res.tasks || res)) || [];
+      for (const t of (Array.isArray(tasks) ? tasks : [])) {
+        if (t && t.id != null) taskMap.set(String(t.id), t);
+        else if (t && t.ID != null) taskMap.set(String(t.ID), t);
+      }
+    }
+    for (const t of taskMap.values()) {
+      const item = mapTask(t, sid);
+      if (item) items.push(item);
+    }
+
+    // События календаря -> события / отсутствия.
+    const events = results[`events_${id}`] || [];
+    for (const e of (Array.isArray(events) ? events : [])) {
+      const item = mapEvent(e, sid);
+      if (item) items.push(item);
+    }
+  }
+
+  // Доводим «часы за сегодня» для видимых задач.
+  await enrichTodayLogged(byUser);
+
+  return byUser;
+}
+
+function mapTask(t, userId) {
+  const title = t.title || t.TITLE || 'Без названия';
+  const planStart = parseB24Date(t.startDatePlan || t.START_DATE_PLAN);
+  const planEnd = parseB24Date(t.endDatePlan || t.END_DATE_PLAN);
+  const deadline = parseB24Date(t.deadline || t.DEADLINE);
+
+  let start, end;
+  if (planStart && planEnd && planEnd > planStart) {
+    start = planStart;
+    end = planEnd;
+  } else if (deadline) {
+    // Без планового интервала — 30-минутный блок, заканчивающийся дедлайном.
+    end = deadline;
+    start = new Date(deadline.getTime() - GRID.slotMinutes * 60 * 1000);
+  } else {
+    return null; // нечего размещать на сетке
+  }
+
+  const statusCode = Number(t.status || t.STATUS);
+  const status = resolveTaskStatus(statusCode, deadline);
+  const timeEstimate = Number(t.timeEstimate || t.TIME_ESTIMATE || 0);
+  const timeSpent = Number(t.timeSpentInLogs || t.TIME_SPENT_IN_LOGS || 0);
+
+  return {
+    id: 'task_' + (t.id || t.ID),
+    rawId: String(t.id || t.ID),
+    kind: 'task',
+    userId,
+    title,
+    description: t.description || t.DESCRIPTION || '',
+    start, end,
+    allDay: false,
+    status,
+    hoursPlan: secondsToHours(timeEstimate),
+    hoursFact: secondsToHours(timeSpent),
+    hoursToday: 0, // заполняется в enrichTodayLogged
+    raw: t,
+  };
+}
+
+function resolveTaskStatus(code, deadline) {
+  const completed = code === 5 || code === 4;
+  if (!completed && deadline && deadline < new Date()) return TASK_STATUS.overdue;
+  switch (code) {
+    case 3: return TASK_STATUS.inProgress;
+    case 6: return TASK_STATUS.deferred;
+    case 4:
+    case 5: return TASK_STATUS.completed;
+    default: return TASK_STATUS.pending;
+  }
+}
+
+function mapEvent(e, userId) {
+  const start = parseB24Date(e.DATE_FROM || e.dateFrom);
+  const end = parseB24Date(e.DATE_TO || e.dateTo);
+  if (!start || !end) return null;
+
+  const accessibility = (e.ACCESSIBILITY || e.accessibility || '').toLowerCase();
+  const isAbsence = accessibility === 'absent';
+  const skipTime = (e.SKIP_TIME || e.skipTime) === 'Y';
+
+  return {
+    id: (isAbsence ? 'absence_' : 'event_') + (e.ID || e.id),
+    rawId: String(e.ID || e.id),
+    kind: isAbsence ? 'absence' : 'event',
+    userId,
+    title: e.NAME || e.name || (isAbsence ? 'Отсутствие' : 'Событие'),
+    description: e.DESCRIPTION || e.description || '',
+    start, end,
+    allDay: skipTime,
+    status: null,
+    hoursPlan: 0, hoursFact: 0, hoursToday: 0,
+    raw: e,
+  };
+}
+
+// Заполняет hoursToday для задач (время, залогированное сегодня).
+async function enrichTodayLogged(byUser) {
+  const todayStart = startOfDay(new Date());
+  const todayEnd = addDays(todayStart, 1);
+
+  const taskItems = [];
+  for (const items of byUser.values()) {
+    for (const it of items) if (it.kind === 'task') taskItems.push(it);
+  }
+  if (taskItems.length === 0) return;
+
+  // Батчим запросы списков затраченного времени порциями по 50.
+  const chunks = [];
+  for (let i = 0; i < taskItems.length; i += 50) chunks.push(taskItems.slice(i, i + 50));
+
+  for (const chunk of chunks) {
+    const calls = {};
+    for (const it of chunk) {
+      calls['e_' + it.rawId] = {
+        method: 'task.elapseditem.getlist',
+        params: {
+          ORDER: { ID: 'ASC' },
+          FILTER: {
+            TASK_ID: it.rawId,
+            '>=CREATED_DATE': toB24DateTime(todayStart),
+            '<CREATED_DATE': toB24DateTime(todayEnd),
+          },
+        },
+      };
+    }
+    let results;
+    try {
+      results = await callBatch(calls);
+    } catch (e) {
+      console.warn('Не удалось получить часы за сегодня:', e);
+      return; // не критично — просто оставим 0
+    }
+    for (const it of chunk) {
+      const rows = results['e_' + it.rawId];
+      if (!Array.isArray(rows)) continue;
+      const sec = rows.reduce((s, r) => s + Number(r.SECONDS || r.seconds || 0), 0);
+      it.hoursToday = secondsToHours(sec);
+    }
+  }
+}
+
+// --- Создание и обновление сущностей --------------------------------------
+
+async function createTask({ title, userId, description, start, end, hoursPlan }) {
+  const fields = {
+    TITLE: title,
+    RESPONSIBLE_ID: userId,
+    DESCRIPTION: description || '',
+  };
+  if (start) fields.START_DATE_PLAN = toB24DateTime(start);
+  if (end) {
+    fields.END_DATE_PLAN = toB24DateTime(end);
+    fields.DEADLINE = toB24DateTime(end);
+  }
+  if (hoursPlan) fields.TIME_ESTIMATE = Math.round(Number(hoursPlan) * 3600);
+  return callMethod('tasks.task.add', { fields });
+}
+
+async function updateTask(rawId, { title, description, start, end, hoursPlan, status }) {
+  const fields = {};
+  if (title != null) fields.TITLE = title;
+  if (description != null) fields.DESCRIPTION = description;
+  if (start) fields.START_DATE_PLAN = toB24DateTime(start);
+  if (end) {
+    fields.END_DATE_PLAN = toB24DateTime(end);
+    fields.DEADLINE = toB24DateTime(end);
+  }
+  if (hoursPlan != null && hoursPlan !== '') fields.TIME_ESTIMATE = Math.round(Number(hoursPlan) * 3600);
+  if (status != null) fields.STATUS = status;
+  return callMethod('tasks.task.update', { taskId: rawId, fields });
+}
+
+// Привязать существующую задачу к слоту = задать плановые даты.
+async function attachTaskToSlot(rawId, start, end) {
+  return callMethod('tasks.task.update', {
+    taskId: rawId,
+    fields: {
+      START_DATE_PLAN: toB24DateTime(start),
+      END_DATE_PLAN: toB24DateTime(end),
+    },
+  });
+}
+
+// Список задач сотрудника для привязки (активные, не завершённые).
+async function loadUserTasksForPick(userId) {
+  const res = await callListMethod('tasks.task.list', {
+    filter: { RESPONSIBLE_ID: userId, '<STATUS': 5 },
+    select: ['ID', 'TITLE', 'STATUS', 'DEADLINE'],
+    order: { ID: 'DESC' },
+  }, { resultKey: 'tasks' });
+  return (res || []).map((t) => ({
+    id: String(t.id || t.ID),
+    title: t.title || t.TITLE || 'Без названия',
+  }));
+}
+
+async function createEvent({ name, userId, description, start, end, kind }) {
+  return callMethod('calendar.event.add', {
+    type: 'user',
+    ownerId: userId,
+    from: toB24DateTime(start),
+    to: toB24DateTime(end),
+    name,
+    description: description || '',
+    accessibility: kind === 'absence' ? 'absent' : 'busy',
+  });
+}
+
+async function updateEvent(rawId, userId, { name, description, start, end, kind }) {
+  const params = { id: rawId, type: 'user', ownerId: userId };
+  if (name != null) params.name = name;
+  if (description != null) params.description = description;
+  if (start) params.from = toB24DateTime(start);
+  if (end) params.to = toB24DateTime(end);
+  if (kind) params.accessibility = kind === 'absence' ? 'absent' : 'busy';
+  return callMethod('calendar.event.update', params);
+}
+
+
+
+// ===== js/ui/toast.js =====
+// Всплывающие уведомления (понятные сообщения об ошибках/успехе).
+
+let container;
+
+function ensureContainer() {
+  if (!container) {
+    container = document.createElement('div');
+    container.className = 'toast-container';
+    document.body.appendChild(container);
+  }
+  return container;
+}
+
+function showToast(message, type = 'info', timeout = 4000) {
+  const el = document.createElement('div');
+  el.className = `toast toast--${type}`;
+  el.textContent = message;
+  ensureContainer().appendChild(el);
+  // запуск анимации появления
+  requestAnimationFrame(() => el.classList.add('toast--visible'));
+  const remove = () => {
+    el.classList.remove('toast--visible');
+    setTimeout(() => el.remove(), 250);
+  };
+  el.addEventListener('click', remove);
+  if (timeout) setTimeout(remove, timeout);
+}
+
+function showError(err) {
+  const msg = err && err.message ? err.message : String(err);
+  showToast(msg, 'error', 6000);
+}
+
+
+// ===== js/ui/tooltip.js =====
+// Единый тултип с полной информацией о ячейке, следующий за курсором.
+
+
+let tip;
+
+function ensure() {
+  if (!tip) {
+    tip = document.createElement('div');
+    tip.className = 'tooltip';
+    document.body.appendChild(tip);
+  }
+  return tip;
+}
+
+function buildHtml(item) {
+  const rows = [];
+  rows.push(`<div class="tooltip__title">${escapeHtml(item.title)}</div>`);
+
+  const kindLabel = { task: 'Задача', event: 'Встреча/событие', absence: 'Отсутствие' }[item.kind];
+  rows.push(`<div class="tooltip__row"><b>Тип:</b> ${kindLabel}</div>`);
+
+  const timeStr = item.allDay
+    ? 'весь день'
+    : `${formatTime(item.start)}–${formatTime(item.end)}`;
+  rows.push(`<div class="tooltip__row"><b>Время:</b> ${timeStr}</div>`);
+
+  if (item.kind === 'task') {
+    rows.push(`<div class="tooltip__row"><b>Часы:</b> ` +
+      `план ${item.hoursPlan}, факт ${item.hoursFact}, сегодня ${item.hoursToday}</div>`);
+    if (item.status) {
+      rows.push(`<div class="tooltip__row"><b>Статус:</b> ${item.status.icon} ${item.status.label}</div>`);
+    }
+  }
+  if (item.description) {
+    rows.push(`<div class="tooltip__row tooltip__desc">${escapeHtml(stripHtml(item.description)).slice(0, 280)}</div>`);
+  }
+  return rows.join('');
+}
+
+function showTooltip(item, x, y) {
+  const el = ensure();
+  el.innerHTML = buildHtml(item);
+  el.classList.add('tooltip--visible');
+  moveTooltip(x, y);
+}
+
+function moveTooltip(x, y) {
+  if (!tip) return;
+  const pad = 14;
+  const rect = tip.getBoundingClientRect();
+  let left = x + pad;
+  let top = y + pad;
+  if (left + rect.width > window.innerWidth) left = x - rect.width - pad;
+  if (top + rect.height > window.innerHeight) top = y - rect.height - pad;
+  tip.style.left = Math.max(4, left) + 'px';
+  tip.style.top = Math.max(4, top) + 'px';
+}
+
+function hideTooltip() {
+  if (tip) tip.classList.remove('tooltip--visible');
+}
+
+function escapeHtml(s) {
+  return String(s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+function stripHtml(s) {
+  return String(s).replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+
+// ===== js/ui/modals.js =====
+// Попапы: меню слота, формы создания/редактирования задач, встреч и отсутствий,
+// выбор существующей задачи для привязки к слоту.
+
+
+// --- Базовый модальный каркас ---------------------------------------------
+
+function openModal({ title, bodyEl, width = 420 }) {
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+
+  const dialog = document.createElement('div');
+  dialog.className = 'modal';
+  dialog.style.maxWidth = width + 'px';
+
+  const head = document.createElement('div');
+  head.className = 'modal__head';
+  head.innerHTML = `<div class="modal__title">${escapeHtml(title)}</div>`;
+  const close = document.createElement('button');
+  close.className = 'modal__close';
+  close.textContent = '×';
+  close.addEventListener('click', () => destroy());
+  head.appendChild(close);
+
+  dialog.appendChild(head);
+  dialog.appendChild(bodyEl);
+  overlay.appendChild(dialog);
+  document.body.appendChild(overlay);
+
+  const onKey = (e) => { if (e.key === 'Escape') destroy(); };
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) destroy(); });
+  document.addEventListener('keydown', onKey);
+
+  function destroy() {
+    document.removeEventListener('keydown', onKey);
+    overlay.remove();
+  }
+  return { overlay, destroy };
+}
+
+// --- Меню при клике по пустому слоту --------------------------------------
+
+function openSlotMenu({ user, start, end }) {
+  const body = document.createElement('div');
+  body.className = 'modal__body slot-menu';
+
+  const hint = document.createElement('div');
+  hint.className = 'slot-menu__hint';
+  hint.textContent = `${user.name} · ${formatDayLabel(start)} · ${formatTime(start)}–${formatTime(end)}`;
+  body.appendChild(hint);
+
+  const actions = [
+    ['＋ Создать задачу', () => { modal.destroy(); openTaskForm({ mode: 'create', user, start, end }); }],
+    ['📋 Выбрать задачу из существующих', () => { modal.destroy(); openPickTask({ user, start, end }); }],
+    ['📅 Создать встречу', () => { modal.destroy(); openEventForm({ mode: 'create', kind: 'event', user, start, end }); }],
+    ['🌴 Добавить отсутствие', () => { modal.destroy(); openEventForm({ mode: 'create', kind: 'absence', user, start, end }); }],
+  ];
+  for (const [label, fn] of actions) {
+    const btn = document.createElement('button');
+    btn.className = 'slot-menu__item';
+    btn.textContent = label;
+    btn.addEventListener('click', fn);
+    body.appendChild(btn);
+  }
+
+  const modal = openModal({ title: 'Что создать?', bodyEl: body, width: 360 });
+}
+
+// --- Выбор существующей задачи --------------------------------------------
+
+async function openPickTask({ user, start, end }) {
+  const body = document.createElement('div');
+  body.className = 'modal__body';
+  body.innerHTML = '<div class="form__loading">Загрузка задач…</div>';
+  const modal = openModal({ title: 'Привязать задачу к слоту', bodyEl: body, width: 460 });
+
+  let tasks;
+  try {
+    tasks = await loadUserTasksForPick(user.id);
+  } catch (e) { showError(e); modal.destroy(); return; }
+
+  body.innerHTML = '';
+  if (tasks.length === 0) {
+    body.innerHTML = '<div class="form__loading">У сотрудника нет активных задач.</div>';
+    return;
+  }
+  const search = inputRow('Поиск', 'text', '');
+  body.appendChild(search.row);
+
+  const list = document.createElement('div');
+  list.className = 'pick-list';
+  body.appendChild(list);
+
+  const render = (q) => {
+    list.innerHTML = '';
+    const filtered = tasks.filter((t) => t.title.toLowerCase().includes(q.toLowerCase()));
+    for (const t of filtered) {
+      const item = document.createElement('button');
+      item.className = 'pick-list__item';
+      item.textContent = t.title;
+      item.addEventListener('click', async () => {
+        try {
+          await attachTaskToSlot(t.id, start, end);
+          showToast('Задача привязана к слоту', 'success');
+          modal.destroy();
+          await bus.reloadWeek();
+        } catch (e) { showError(e); }
+      });
+      list.appendChild(item);
+    }
+  };
+  search.input.addEventListener('input', () => render(search.input.value));
+  render('');
+}
+
+// --- Форма задачи (создание/редактирование) -------------------------------
+
+function openTaskForm({ mode, user, start, end, item }) {
+  const body = document.createElement('div');
+  body.className = 'modal__body';
+
+  const isEdit = mode === 'edit';
+  const u = user || selectedUsers().find((x) => x.id === item.userId) || { id: item && item.userId, name: '' };
+
+  const fTitle = inputRow('Название задачи *', 'text', isEdit ? item.title : '');
+  const fStart = inputRow('Начало', 'datetime-local', toDateTimeInputValue(isEdit ? item.start : start));
+  const fEnd = inputRow('Окончание', 'datetime-local', toDateTimeInputValue(isEdit ? item.end : end));
+  const fHours = inputRow('Плановые часы', 'number', isEdit ? item.hoursPlan : '');
+  fHours.input.step = '0.5'; fHours.input.min = '0';
+  const fDesc = textareaRow('Описание', isEdit ? stripHtml(item.description) : '');
+
+  body.appendChild(metaLine(`Сотрудник: ${u.name || ('ID ' + u.id)}`));
+  body.appendChild(fTitle.row);
+  body.appendChild(fStart.row);
+  body.appendChild(fEnd.row);
+  body.appendChild(fHours.row);
+
+  let fStatus;
+  if (isEdit) {
+    fStatus = selectRow('Статус', statusOptions(), String(item.status ? item.status.code : 2));
+    body.appendChild(fStatus.row);
+  }
+  body.appendChild(fDesc.row);
+
+  const modal = openModal({ title: isEdit ? 'Редактирование задачи' : 'Создать задачу', bodyEl: body });
+  addFooter(body, modal, async () => {
+    const payload = {
+      title: fTitle.input.value.trim(),
+      description: fDesc.input.value,
+      start: new Date(fStart.input.value),
+      end: new Date(fEnd.input.value),
+      hoursPlan: fHours.input.value,
+    };
+    if (!payload.title) throw new Error('Укажите название задачи');
+    if (!(payload.end > payload.start)) throw new Error('Окончание должно быть позже начала');
+
+    if (isEdit) {
+      await updateTask(item.rawId, { ...payload, status: fStatus ? Number(fStatus.input.value) : undefined });
+      showToast('Задача обновлена', 'success');
+    } else {
+      await createTask({ ...payload, userId: u.id });
+      showToast('Задача создана', 'success');
+    }
+  });
+}
+
+function statusOptions() {
+  return [
+    [String(TASK_STATUS.pending.code), TASK_STATUS.pending.label],
+    [String(TASK_STATUS.inProgress.code), TASK_STATUS.inProgress.label],
+    [String(TASK_STATUS.deferred.code), TASK_STATUS.deferred.label],
+    [String(TASK_STATUS.completed.code), TASK_STATUS.completed.label],
+  ];
+}
+
+// --- Форма встречи / отсутствия -------------------------------------------
+
+function openEventForm({ mode, kind, user, start, end, item }) {
+  const body = document.createElement('div');
+  body.className = 'modal__body';
+
+  const isEdit = mode === 'edit';
+  const realKind = isEdit ? item.kind : kind;
+  const u = user || selectedUsers().find((x) => x.id === item.userId) || { id: item && item.userId, name: '' };
+  const isAbsence = realKind === 'absence';
+
+  const fName = inputRow(isAbsence ? 'Причина отсутствия *' : 'Название встречи *', 'text', isEdit ? item.title : '');
+  const fStart = inputRow('Начало', 'datetime-local', toDateTimeInputValue(isEdit ? item.start : start));
+  const fEnd = inputRow('Окончание', 'datetime-local', toDateTimeInputValue(isEdit ? item.end : end));
+  const fDesc = textareaRow('Описание', isEdit ? stripHtml(item.description) : '');
+
+  body.appendChild(metaLine(`Сотрудник: ${u.name || ('ID ' + u.id)}`));
+  body.appendChild(fName.row);
+  body.appendChild(fStart.row);
+  body.appendChild(fEnd.row);
+  body.appendChild(fDesc.row);
+
+  const title = isAbsence
+    ? (isEdit ? 'Редактирование отсутствия' : 'Добавить отсутствие')
+    : (isEdit ? 'Редактирование встречи' : 'Создать встречу');
+  const modal = openModal({ title, bodyEl: body });
+
+  addFooter(body, modal, async () => {
+    const name = fName.input.value.trim();
+    const s = new Date(fStart.input.value);
+    const e = new Date(fEnd.input.value);
+    if (!name) throw new Error('Укажите название');
+    if (!(e > s)) throw new Error('Окончание должно быть позже начала');
+
+    if (isEdit) {
+      await updateEvent(item.rawId, u.id, { name, description: fDesc.input.value, start: s, end: e, kind: realKind });
+      showToast(isAbsence ? 'Отсутствие обновлено' : 'Встреча обновлена', 'success');
+    } else {
+      await createEvent({ name, userId: u.id, description: fDesc.input.value, start: s, end: e, kind: realKind });
+      showToast(isAbsence ? 'Отсутствие добавлено' : 'Встреча создана', 'success');
+    }
+  });
+}
+
+// --- Диспетчер редактирования по типу сущности ----------------------------
+
+function openEditModal(item) {
+  if (item.kind === 'task') openTaskForm({ mode: 'edit', item });
+  else openEventForm({ mode: 'edit', item });
+}
+
+// --- Общие элементы формы -------------------------------------------------
+
+function addFooter(body, modal, onSubmit) {
+  const footer = document.createElement('div');
+  footer.className = 'modal__footer';
+  const cancel = document.createElement('button');
+  cancel.className = 'btn btn--ghost';
+  cancel.textContent = 'Отмена';
+  cancel.addEventListener('click', () => modal.destroy());
+  const save = document.createElement('button');
+  save.className = 'btn btn--primary';
+  save.textContent = 'Сохранить';
+  save.addEventListener('click', async () => {
+    save.disabled = true; save.textContent = 'Сохранение…';
+    try {
+      await onSubmit();
+      modal.destroy();
+      await bus.reloadWeek();
+    } catch (e) {
+      showError(e);
+      save.disabled = false; save.textContent = 'Сохранить';
+    }
+  });
+  footer.appendChild(cancel);
+  footer.appendChild(save);
+  body.appendChild(footer);
+}
+
+function metaLine(text) {
+  const d = document.createElement('div');
+  d.className = 'form__meta';
+  d.textContent = text;
+  return d;
+}
+
+function inputRow(label, type, value) {
+  const row = document.createElement('label');
+  row.className = 'form__row';
+  const span = document.createElement('span');
+  span.className = 'form__label';
+  span.textContent = label;
+  const input = document.createElement('input');
+  input.className = 'form__input';
+  input.type = type;
+  if (value !== undefined && value !== null) input.value = value;
+  row.appendChild(span); row.appendChild(input);
+  return { row, input };
+}
+
+function textareaRow(label, value) {
+  const row = document.createElement('label');
+  row.className = 'form__row';
+  const span = document.createElement('span');
+  span.className = 'form__label';
+  span.textContent = label;
+  const input = document.createElement('textarea');
+  input.className = 'form__input form__textarea';
+  input.rows = 3;
+  input.value = value || '';
+  row.appendChild(span); row.appendChild(input);
+  return { row, input };
+}
+
+function selectRow(label, options, value) {
+  const row = document.createElement('label');
+  row.className = 'form__row';
+  const span = document.createElement('span');
+  span.className = 'form__label';
+  span.textContent = label;
+  const input = document.createElement('select');
+  input.className = 'form__input';
+  for (const [val, text] of options) {
+    const opt = document.createElement('option');
+    opt.value = val; opt.textContent = text;
+    if (val === value) opt.selected = true;
+    input.appendChild(opt);
+  }
+  row.appendChild(span); row.appendChild(input);
+  return { row, input };
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+function stripHtml(s) {
+  return String(s || '').replace(/<br\s*\/?>(?=)/gi, '\n').replace(/<[^>]*>/g, '').trim();
+}
+
+
+// ===== js/ui/calendar.js =====
+// Рендер недельной сетки календаря: дни ПН–ПТ, временная шкала 8:00–18:00,
+// шаг 30 минут, многоколоночная разбивка по сотрудникам.
+
+
+const SLOTS_PER_DAY = (GRID.workEndHour - GRID.workStartHour) * (60 / GRID.slotMinutes); // 20
+const BODY_HEIGHT = SLOTS_PER_DAY * GRID.slotHeightPx; // 1000px
+
+function renderCalendar(root) {
+  root.innerHTML = '';
+
+  const users = selectedUsers();
+  if (users.length === 0) {
+    root.appendChild(emptyHint());
+    return;
+  }
+
+  const days = weekDays(state.currentWeek);
+
+  const scrollY = el('div', 'cal-scroll-y');
+  const grid = el('div', 'cal-grid');
+  grid.appendChild(buildTimeColumn());
+  for (const day of days) {
+    grid.appendChild(buildDayColumn(day, users));
+  }
+  scrollY.appendChild(grid);
+  root.appendChild(scrollY);
+}
+
+function emptyHint() {
+  const box = el('div', 'cal-empty');
+  box.innerHTML =
+    '<div class="cal-empty__icon">📅</div>' +
+    '<div class="cal-empty__text">Выберите сотрудников для отображения</div>' +
+    '<div class="cal-empty__hint">До 5 сотрудников — через список в шапке или настройки (⚙).</div>';
+  return box;
+}
+
+// --- Колонка временной шкалы ----------------------------------------------
+
+function buildTimeColumn() {
+  const col = el('div', 'cal-time');
+  const header = el('div', 'cal-time__header');
+  col.appendChild(header);
+
+  const body = el('div', 'cal-time__body');
+  body.style.height = BODY_HEIGHT + 'px';
+  for (let i = 0; i < SLOTS_PER_DAY; i++) {
+    const label = el('div', 'cal-time__slot');
+    label.style.height = GRID.slotHeightPx + 'px';
+    const minutes = i * GRID.slotMinutes;
+    if (minutes % 60 === 0) {
+      const hour = GRID.workStartHour + minutes / 60;
+      label.textContent = String(hour).padStart(2, '0') + ':00';
+      label.classList.add('cal-time__slot--hour');
+    }
+    body.appendChild(label);
+  }
+  col.appendChild(body);
+  return col;
+}
+
+// --- Колонка дня ----------------------------------------------------------
+
+function buildDayColumn(day, users) {
+  const col = el('div', 'cal-day');
+  if (isToday(day)) col.classList.add('cal-day--today');
+
+  const header = el('div', 'cal-day__header');
+  header.textContent = formatDayLabel(day);
+  col.appendChild(header);
+
+  // Минимальная ширина подколонки сотрудника. При 3+ сотрудниках появляется
+  // горизонтальный скролл всей сетки (за счёт суммарной ширины).
+  const subWidth = users.length >= 3 ? 140 : 0;
+
+  const subHeader = el('div', 'cal-day__sub');
+  for (const u of users) {
+    const cell = el('div', 'cal-day__sub-cell');
+    if (subWidth) cell.style.minWidth = subWidth + 'px';
+    cell.title = u.name + (u.position ? ' — ' + u.position : '');
+    cell.textContent = shortName(u.name);
+    subHeader.appendChild(cell);
+  }
+  col.appendChild(subHeader);
+
+  const body = el('div', 'cal-day__body');
+  for (const u of users) {
+    body.appendChild(buildSubColumn(day, u, subWidth));
+  }
+  col.appendChild(body);
+  return col;
+}
+
+function buildSubColumn(day, user, minColWidth) {
+  const sub = el('div', 'cal-subcol');
+  sub.style.height = BODY_HEIGHT + 'px';
+  if (minColWidth) sub.style.minWidth = minColWidth + 'px';
+
+  // Фоновые 30-минутные слоты (кликабельны для создания).
+  for (let i = 0; i < SLOTS_PER_DAY; i++) {
+    const slot = el('div', 'cal-slot');
+    slot.style.height = GRID.slotHeightPx + 'px';
+    if (i % 2 === 1) slot.classList.add('cal-slot--half');
+    slot.addEventListener('click', () => {
+      const start = slotTime(day, i);
+      const end = slotTime(day, i + 1);
+      openSlotMenu({ user, start, end });
+    });
+    sub.appendChild(slot);
+  }
+
+  // Блоки сущностей поверх слотов.
+  const items = itemsFor(user.id);
+  const dayItems = items
+    .map((it) => geometryFor(it, day))
+    .filter(Boolean);
+  layoutLanes(dayItems);
+  for (const g of dayItems) {
+    sub.appendChild(buildBlock(g));
+  }
+  return sub;
+}
+
+// --- Геометрия блока на сетке дня ------------------------------------------
+
+function geometryFor(item, day) {
+  const dayStart = startOfDay(day);
+  const nextDay = addDays(dayStart, 1);
+  // Пересекает ли этот день вообще?
+  if (item.end <= dayStart || item.start >= nextDay) return null;
+
+  const gridTop = new Date(dayStart); gridTop.setHours(GRID.workStartHour, 0, 0, 0);
+  const gridBottom = new Date(dayStart); gridBottom.setHours(GRID.workEndHour, 0, 0, 0);
+
+  const continuesBefore = item.start < gridTop;
+  const continuesAfter = item.end > gridBottom;
+
+  let clampStart = item.start < gridTop ? gridTop : item.start;
+  let clampEnd = item.end > gridBottom ? gridBottom : item.end;
+
+  let top, height, outOfGrid = false;
+  if (item.allDay) {
+    top = 0; height = BODY_HEIGHT;
+  } else if (clampEnd <= clampStart) {
+    // Полностью вне рабочих часов, но внутри дня — прижимаем к краю.
+    outOfGrid = true;
+    if (item.end <= gridTop) { top = 0; height = 18; }
+    else { top = BODY_HEIGHT - 18; height = 18; }
+  } else {
+    top = (minutesFromGridStart(clampStart) / GRID.slotMinutes) * GRID.slotHeightPx;
+    const endMin = (clampEnd - gridTop) / 60000;
+    height = (endMin / GRID.slotMinutes) * GRID.slotHeightPx - top;
+    height = Math.max(height, 22); // минимально видимая высота
+  }
+
+  return {
+    item, top, height,
+    continuesBefore, continuesAfter, outOfGrid,
+    lane: 0, lanes: 1,
+  };
+}
+
+// Простейшая раскладка пересекающихся блоков по «дорожкам».
+function layoutLanes(geoms) {
+  const sorted = [...geoms].sort((a, b) => a.top - b.top || a.item.start - b.item.start);
+  const active = []; // {endPx, lane}
+  let cluster = [];
+  let clusterEnd = -Infinity;
+
+  const flush = () => {
+    const lanes = Math.max(1, new Set(cluster.map((g) => g.lane)).size);
+    for (const g of cluster) g.lanes = lanes;
+    cluster = [];
+  };
+
+  for (const g of sorted) {
+    if (g.top >= clusterEnd) { flush(); active.length = 0; }
+    // найти свободную дорожку
+    let lane = 0;
+    while (active.some((a) => a.lane === lane && a.endPx > g.top)) lane++;
+    g.lane = lane;
+    active.push({ lane, endPx: g.top + g.height });
+    clusterEnd = Math.max(clusterEnd, g.top + g.height);
+    cluster.push(g);
+  }
+  flush();
+}
+
+// --- DOM блока ------------------------------------------------------------
+
+function buildBlock(g) {
+  const { item } = g;
+  const block = el('div', `cal-block cal-block--${item.kind}`);
+  const colors = COLORS[item.kind];
+  block.style.top = g.top + 'px';
+  block.style.height = g.height + 'px';
+  block.style.left = `calc(${(g.lane / g.lanes) * 100}% + 2px)`;
+  block.style.width = `calc(${100 / g.lanes}% - 4px)`;
+  block.style.background = colors.bg;
+  block.style.borderColor = colors.border;
+  if (g.outOfGrid) block.classList.add('cal-block--edge');
+
+  // Маркеры выхода за пределы сетки (для событий с конкретным временем).
+  if (!item.allDay && g.continuesBefore) block.appendChild(edgeMark('top', '↑ до сетки'));
+  if (!item.allDay && g.continuesAfter) block.appendChild(edgeMark('bottom', '↓ за сеткой'));
+
+  const content = el('div', 'cal-block__content');
+  const title = el('div', 'cal-block__title');
+  title.textContent = item.title;
+  content.appendChild(title);
+
+  if (item.kind === 'task') {
+    const meta = el('div', 'cal-block__meta');
+    meta.innerHTML =
+      `<span class="cal-block__status" title="${item.status.label}">${item.status.icon}</span>` +
+      `<span class="cal-block__hours">ф:${item.hoursFact}/п:${item.hoursPlan}/с:${item.hoursToday}</span>`;
+    content.appendChild(meta);
+  } else {
+    const meta = el('div', 'cal-block__meta');
+    meta.textContent = item.allDay ? 'весь день' : `${formatTime(item.start)}–${formatTime(item.end)}`;
+    content.appendChild(meta);
+  }
+  block.appendChild(content);
+
+  // Карандаш редактирования при наведении.
+  const pencil = el('button', 'cal-block__edit');
+  pencil.textContent = '✎';
+  pencil.title = 'Редактировать';
+  pencil.addEventListener('click', (e) => { e.stopPropagation(); openEditModal(item); });
+  block.appendChild(pencil);
+
+  // Взаимодействие.
+  block.addEventListener('dblclick', (e) => { e.stopPropagation(); openEditModal(item); });
+  block.addEventListener('mouseenter', (e) => showTooltip(item, e.clientX, e.clientY));
+  block.addEventListener('mousemove', (e) => moveTooltip(e.clientX, e.clientY));
+  block.addEventListener('mouseleave', hideTooltip);
+
+  return block;
+}
+
+function edgeMark(pos, text) {
+  const m = el('div', `cal-block__edge cal-block__edge--${pos}`);
+  m.textContent = text;
+  return m;
+}
+
+// --- Вспомогательное ------------------------------------------------------
+
+function slotTime(day, slotIndex) {
+  const d = startOfDay(day);
+  const minutes = GRID.workStartHour * 60 + slotIndex * GRID.slotMinutes;
+  d.setMinutes(minutes);
+  return d;
+}
+
+function shortName(name) {
+  const parts = String(name).split(' ');
+  if (parts.length >= 2) return `${parts[0]} ${parts[1][0]}.`;
+  return name;
+}
+
+function el(tag, className) {
+  const e = document.createElement(tag);
+  if (className) e.className = className;
+  return e;
+}
+
+
+// ===== js/ui/employees.js =====
+// Мультиселект сотрудников в шапке (до 5) и попап настроек (шестерёнка).
+// Выбор сохраняется в настройках приложения Битрикс24 и применяется сразу.
+
+
+let headerButton = null; // ссылка на кнопку шапки для обновления подписи
+
+async function applySelection(ids) {
+  setSelectedUserIds(ids);
+  if (headerButton) refreshLabel(headerButton);
+  emit(); // мгновенно перерисовать колонки/шапку
+  try {
+    await saveSelectedUserIds(state.selectedUserIds);
+  } catch (e) {
+    showError(e);
+  }
+  await bus.reloadWeek();
+}
+
+// --- Выпадающий мультиселект в шапке --------------------------------------
+
+function renderHeaderPicker(container) {
+  container.innerHTML = '';
+  const wrap = document.createElement('div');
+  wrap.className = 'emp-picker';
+
+  const button = document.createElement('button');
+  button.className = 'emp-picker__button';
+  headerButton = button;
+  button.appendChild(labelSpan());
+  button.insertAdjacentHTML('beforeend', '<span class="emp-picker__caret">▾</span>');
+  wrap.appendChild(button);
+
+  const panel = buildCheckboxPanel({
+    getSelected: () => new Set(state.selectedUserIds),
+    onChange: (ids) => { applySelection(ids); refreshLabel(button); },
+  });
+  panel.classList.add('emp-picker__panel');
+  panel.style.display = 'none';
+  wrap.appendChild(panel);
+
+  button.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const open = panel.style.display === 'none';
+    panel.style.display = open ? 'block' : 'none';
+    if (open) panel.refresh();
+  });
+  document.addEventListener('click', (e) => {
+    if (!wrap.contains(e.target)) panel.style.display = 'none';
+  });
+
+  container.appendChild(wrap);
+  refreshLabel(button);
+}
+
+function labelSpan() {
+  const s = document.createElement('span');
+  s.className = 'emp-picker__label';
+  return s;
+}
+
+function refreshLabel(button) {
+  const span = button.querySelector('.emp-picker__label');
+  const ids = state.selectedUserIds;
+  if (ids.length === 0) {
+    span.textContent = 'Выберите сотрудников';
+    return;
+  }
+  const byId = new Map(state.allUsers.map((u) => [u.id, u]));
+  const names = ids.map((id) => (byId.get(id) || {}).name || ('ID ' + id));
+  span.textContent = `${names.length} выбрано: ${names.map(short).join(', ')}`;
+}
+
+function short(name) {
+  const p = String(name).split(' ');
+  return p.length >= 2 ? `${p[0]} ${p[1][0]}.` : name;
+}
+
+// --- Настройки (шестерёнка) -----------------------------------------------
+
+function openSettings() {
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  const dialog = document.createElement('div');
+  dialog.className = 'modal';
+  dialog.style.maxWidth = '460px';
+  dialog.innerHTML =
+    '<div class="modal__head"><div class="modal__title">Настройки</div>' +
+    '<button class="modal__close">×</button></div>';
+
+  const bodyWrap = document.createElement('div');
+  bodyWrap.className = 'modal__body';
+  bodyWrap.innerHTML =
+    `<div class="form__meta">Сотрудники по умолчанию (до ${GRID.maxEmployees}). ` +
+    'Сохраняются в настройках приложения и подгружаются при каждом запуске.</div>';
+
+  // Локальный выбор в попапе, применяется по «Сохранить».
+  let localIds = [...state.selectedUserIds];
+  const panel = buildCheckboxPanel({
+    getSelected: () => new Set(localIds),
+    onChange: (ids) => { localIds = ids; },
+    embedded: true,
+  });
+  bodyWrap.appendChild(panel);
+
+  const footer = document.createElement('div');
+  footer.className = 'modal__footer';
+  footer.innerHTML =
+    '<button class="btn btn--ghost" data-act="cancel">Отмена</button>' +
+    '<button class="btn btn--primary" data-act="save">Сохранить</button>';
+  bodyWrap.appendChild(footer);
+  dialog.appendChild(bodyWrap);
+  overlay.appendChild(dialog);
+  document.body.appendChild(overlay);
+
+  const destroy = () => overlay.remove();
+  dialog.querySelector('.modal__close').addEventListener('click', destroy);
+  footer.querySelector('[data-act=cancel]').addEventListener('click', destroy);
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) destroy(); });
+  footer.querySelector('[data-act=save]').addEventListener('click', async () => {
+    await applySelection(localIds);
+    showToast('Настройки сохранены', 'success');
+    destroy();
+  });
+}
+
+// --- Переиспользуемая панель с чекбоксами ----------------------------------
+
+function buildCheckboxPanel({ getSelected, onChange, embedded }) {
+  const panel = document.createElement('div');
+  panel.className = 'emp-panel' + (embedded ? ' emp-panel--embedded' : '');
+
+  const search = document.createElement('input');
+  search.className = 'emp-panel__search';
+  search.type = 'text';
+  search.placeholder = 'Поиск сотрудника…';
+  panel.appendChild(search);
+
+  const counter = document.createElement('div');
+  counter.className = 'emp-panel__counter';
+  panel.appendChild(counter);
+
+  const list = document.createElement('div');
+  list.className = 'emp-panel__list';
+  panel.appendChild(list);
+
+  function currentSelected() { return new Set(getSelected()); }
+
+  function render() {
+    const selected = currentSelected();
+    counter.textContent = `Выбрано ${selected.size} из ${GRID.maxEmployees}`;
+    const q = search.value.trim().toLowerCase();
+    list.innerHTML = '';
+    const users = state.allUsers.filter((u) =>
+      !q || u.name.toLowerCase().includes(q) || (u.position || '').toLowerCase().includes(q));
+    if (users.length === 0) {
+      list.innerHTML = '<div class="emp-panel__empty">Ничего не найдено</div>';
+      return;
+    }
+    for (const u of users) {
+      const isOn = selected.has(u.id);
+      const atLimit = selected.size >= GRID.maxEmployees && !isOn;
+      const row = document.createElement('label');
+      row.className = 'emp-row' + (atLimit ? ' emp-row--disabled' : '');
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.checked = isOn;
+      cb.disabled = atLimit;
+      cb.addEventListener('change', () => {
+        const set = currentSelected();
+        if (cb.checked) {
+          if (set.size >= GRID.maxEmployees) { cb.checked = false; return; }
+          set.add(u.id);
+        } else {
+          set.delete(u.id);
+        }
+        onChange([...set]);
+        render();
+      });
+      const info = document.createElement('div');
+      info.className = 'emp-row__info';
+      info.innerHTML = `<div class="emp-row__name">${escapeHtml(u.name)}</div>` +
+        (u.position ? `<div class="emp-row__pos">${escapeHtml(u.position)}</div>` : '');
+      row.appendChild(cb);
+      row.appendChild(info);
+      list.appendChild(row);
+    }
+  }
+
+  search.addEventListener('input', render);
+  panel.refresh = render;
+  render();
+  return panel;
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+
+// ===== js/app.js =====
+// Точка входа: инициализация Битрикс24, загрузка данных и связывание UI.
+
+
+const $ = (sel) => document.querySelector(sel);
+
+async function boot() {
+  bindHeader();
+  subscribe(renderAll);
+
+  try {
+    await init();
+  } catch (e) {
+    showError(e);
+    $('#calendar').innerHTML =
+      '<div class="cal-empty"><div class="cal-empty__icon">⚠</div>' +
+      '<div class="cal-empty__text">Откройте приложение внутри портала Битрикс24.</div></div>';
+    return;
+  }
+
+  await loadInitialData();
+}
+
+async function loadInitialData() {
+  state.loading = true; emit();
+  try {
+    const [users, savedIds] = await Promise.all([loadUsers(), loadSelectedUserIds()]);
+    state.allUsers = users;
+    // Оставляем только реально существующих сотрудников.
+    const valid = new Set(users.map((u) => u.id));
+    setSelectedUserIds(savedIds.filter((id) => valid.has(id)));
+    renderHeaderPicker($('#emp-picker'));
+  } catch (e) {
+    showError(e);
+  } finally {
+    state.loading = false; emit();
+  }
+  await reloadWeek();
+}
+
+async function reloadWeek() {
+  if (state.selectedUserIds.length === 0) {
+    state.dataByUser = new Map();
+    emit();
+    return;
+  }
+  state.loading = true; state.error = null; emit();
+  try {
+    state.dataByUser = await loadWeekData(state.selectedUserIds, state.currentWeek);
+  } catch (e) {
+    state.error = e;
+    showError(e);
+  } finally {
+    state.loading = false; emit();
+  }
+}
+bus.reloadWeek = reloadWeek;
+
+// --- Шапка ----------------------------------------------------------------
+
+function bindHeader() {
+  $('#nav-prev').addEventListener('click', () => changeWeek(-1));
+  $('#nav-next').addEventListener('click', () => changeWeek(1));
+  $('#nav-today').addEventListener('click', () => {
+    state.currentWeek = startOfWeek(new Date());
+    reloadWeek();
+  });
+  $('#btn-settings').addEventListener('click', openSettings);
+}
+
+function changeWeek(delta) {
+  state.currentWeek = addWeeks(state.currentWeek, delta);
+  reloadWeek();
+}
+
+// --- Рендер по изменению состояния ----------------------------------------
+
+function renderAll() {
+  updateWeekLabel();
+  updateLoading();
+  renderCalendar($('#calendar'));
+}
+
+function updateWeekLabel() {
+  const days = weekDays(state.currentWeek);
+  const first = days[0];
+  const last = days[days.length - 1];
+  $('#week-label').textContent = `${formatDayLabel(first)} — ${formatDayLabel(last)}`;
+}
+
+function updateLoading() {
+  document.body.classList.toggle('is-loading', !!state.loading);
+}
+
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', boot);
+} else {
+  boot();
+}
+
+})();
+</script>
+</body>
+</html>
