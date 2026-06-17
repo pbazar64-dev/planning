@@ -2002,38 +2002,86 @@ function openSettings() {
 
   const bodyWrap = document.createElement('div');
   bodyWrap.className = 'modal__body';
-  bodyWrap.innerHTML =
-    `<div class="form__meta">Сотрудники по умолчанию (до ${GRID.maxEmployees}). ` +
-    'Сохраняются в настройках приложения и подгружаются при каждом запуске.</div>';
-
-  // Локальный выбор в попапе, применяется по «Сохранить».
-  let localIds = [...state.selectedUserIds];
-  const panel = buildCheckboxPanel({
-    getSelected: () => new Set(localIds),
-    onChange: (ids) => { localIds = ids; },
-    embedded: true,
-  });
-  bodyWrap.appendChild(panel);
-
-  const footer = document.createElement('div');
-  footer.className = 'modal__footer';
-  footer.innerHTML =
-    '<button class="btn btn--ghost" data-act="cancel">Отмена</button>' +
-    '<button class="btn btn--primary" data-act="save">Сохранить</button>';
-  bodyWrap.appendChild(footer);
   dialog.appendChild(bodyWrap);
   overlay.appendChild(dialog);
   document.body.appendChild(overlay);
 
   const destroy = () => overlay.remove();
   dialog.querySelector('.modal__close').addEventListener('click', destroy);
-  footer.querySelector('[data-act=cancel]').addEventListener('click', destroy);
   overlay.addEventListener('click', (e) => { if (e.target === overlay) destroy(); });
-  footer.querySelector('[data-act=save]').addEventListener('click', async () => {
-    await applySelection(localIds);
-    showToast('Настройки сохранены', 'success');
-    destroy();
-  });
+
+  // Локальный выбор в попапе, применяется по «Сохранить».
+  let localIds = [...state.selectedUserIds];
+
+  // Список сотрудников подгружаем из портала Битрикс24 (user.get) прямо при
+  // открытии попапа, а не только при старте приложения. Так выбор остаётся
+  // доступным, даже если первичная загрузка не прошла.
+  async function renderBody() {
+    bodyWrap.innerHTML =
+      `<div class="form__meta">Сотрудники по умолчанию (до ${GRID.maxEmployees}). ` +
+      'Список загружается из портала Битрикс24 и сохраняется в настройках приложения.</div>';
+
+    if (state.allUsers.length === 0) {
+      const loading = document.createElement('div');
+      loading.className = 'form__loading';
+      loading.textContent = 'Загрузка сотрудников портала…';
+      bodyWrap.appendChild(loading);
+      try {
+        state.allUsers = await loadUsers();
+        emit(); // обновить подпись мультиселекта в шапке
+      } catch (e) {
+        renderError(e);
+        return;
+      }
+    }
+
+    if (state.allUsers.length === 0) {
+      renderError(new Error('Портал не вернул ни одного активного сотрудника.'));
+      return;
+    }
+
+    bodyWrap.querySelector('.form__loading')?.remove();
+    const panel = buildCheckboxPanel({
+      getSelected: () => new Set(localIds),
+      onChange: (ids) => { localIds = ids; },
+      embedded: true,
+    });
+    bodyWrap.appendChild(panel);
+    bodyWrap.appendChild(buildFooter());
+  }
+
+  function renderError(e) {
+    bodyWrap.querySelector('.form__loading')?.remove();
+    const box = document.createElement('div');
+    box.className = 'form__loading';
+    box.textContent = 'Не удалось загрузить список сотрудников: ' +
+      (e && e.message ? e.message : String(e));
+    const retry = document.createElement('button');
+    retry.className = 'btn btn--primary';
+    retry.style.marginTop = '12px';
+    retry.textContent = 'Повторить';
+    retry.addEventListener('click', renderBody);
+    box.appendChild(document.createElement('br'));
+    box.appendChild(retry);
+    bodyWrap.appendChild(box);
+  }
+
+  function buildFooter() {
+    const footer = document.createElement('div');
+    footer.className = 'modal__footer';
+    footer.innerHTML =
+      '<button class="btn btn--ghost" data-act="cancel">Отмена</button>' +
+      '<button class="btn btn--primary" data-act="save">Сохранить</button>';
+    footer.querySelector('[data-act=cancel]').addEventListener('click', destroy);
+    footer.querySelector('[data-act=save]').addEventListener('click', async () => {
+      await applySelection(localIds);
+      showToast('Настройки сохранены', 'success');
+      destroy();
+    });
+    return footer;
+  }
+
+  renderBody();
 }
 
 // --- Переиспользуемая панель с чекбоксами ----------------------------------
