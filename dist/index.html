@@ -4,8 +4,6 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Планировщик — Битрикс24</title>
-  <!-- BX24 JS SDK: авторизация и REST внутри портала Битрикс24 -->
-  <script src="//api.bitrix24.com/api/v1/"></script>
   <style>
 /* Планировщик для Битрикс24 — минималистичный Material-стиль. */
 
@@ -359,28 +357,15 @@ body.is-loading .app-header__progress {
 // ===== js/config.js =====
 // Конфигурация приложения-планировщика для Битрикс24.
 //
-// Приложение встраивается в портал Битрикс24 как placement-приложение и
-// работает через BX24 JS SDK (см. js/b24.js). Авторизация выполняется самим
-// порталом в рамках iframe — отдельный ключ при этом не требуется.
-//
-// Если же вы хотите запускать приложение как standalone и обращаться к шлюзу
-// vibecode (https://vibecode.bitrix24.tech), включите режим GATEWAY ниже и
-// укажите ключ. Весь сетевой контракт шлюза сосредоточен в js/b24.js, чтобы
-// при необходимости его было легко поправить в одном месте.
+// Приложение размещается на хостинге vibecode по BFF-схеме: шлюз авторизует
+// пользователя портала и проксирует REST. Фронтенд ходит на собственный
+// бэкенд (`/api/v1/*`, см. server/bff.py), который подставляет сессию шлюза и
+// обращается к REST vibecode. Секретов/ключей во фронтенде нет — токен сессии
+// живёт только между шлюзом и сервером приложения.
 
 const CONFIG = {
-  // 'bx24'    — встраиваемое приложение (BX24 JS SDK). Режим по умолчанию.
-  // 'gateway' — standalone-режим через шлюз vibecode с Bearer-ключом.
-  transport: 'bx24',
-
-  gateway: {
-    baseUrl: 'https://vibecode.bitrix24.tech',
-    // Ключ доступа выдаётся в портале Битрикс24 (раздел Вайбкод).
-    // ВНИМАНИЕ: это секрет — не публикуйте его в открытых репозиториях.
-    accessKey: 'vibe_app_local_6a31460e09cd47_92314079_Ly1fiSDLl3I0qXAlchUuD37a0a7kTtPnNtrp0yj6rmO7ZvuT2i_e30907',
-    callPath: '/v1/call',   // POST { method, params } -> { result, error, ... }
-    batchPath: '/v1/batch', // POST { halt, cmd } -> { result, error, ... }
-  },
+  // Базовый путь к BFF-прокси (тот же origin, что и страница).
+  apiBase: '/api/v1',
 
   // Сетевые повторы при временных сбоях.
   retry: {
@@ -604,16 +589,14 @@ const bus = {
 
 
 // ===== js/b24.js =====
-// Транспортный слой к Битрикс24.
+// Транспортный слой к REST Битрикс24 через собственный BFF.
 //
-// Один интерфейс — два режима:
-//   * 'bx24'    — встраиваемое приложение через глобальный BX24 JS SDK
-//                 (подключается в index.html как //api.bitrix24.com/api/v1/).
-//   * 'gateway' — standalone через REST-шлюз vibecode с Bearer-ключом.
+// Схема vibecode: шлюз авторизует пользователя портала и на пути «шлюз ->
+// сервер приложения» подставляет заголовок сессии. Браузер токен не видит,
+// поэтому фронтенд обращается к нашему бэкенду `/api/v1/*` (server/bff.py),
+// а тот уже проксирует на REST vibecode (`/v1/*`) с этой сессией.
 //
-// Наружу отдаём небольшой набор функций: init, callMethod, callListMethod,
-// callBatch, getOption, setOption. Весь специфичный для шлюза HTTP-контракт
-// сосредоточен здесь — если формат эндпоинта отличается, правится одно место.
+// Наружу отдаём: init, apiGet, apiSend, getOption, setOption, OPTION_KEYS.
 
 
 class B24Error extends Error {
@@ -625,37 +608,30 @@ class B24Error extends Error {
   }
 }
 
-const isGateway = () => CONFIG.transport === 'gateway';
+// --- Инициализация: проверяем, что шлюз отдал сессию --------------------
 
-// --- Инициализация -------------------------------------------------------
-
-let bx24Ready = null;
+let ready = null;
 
 function init() {
-  if (isGateway()) return Promise.resolve();
-  if (bx24Ready) return bx24Ready;
-
-  bx24Ready = new Promise((resolve, reject) => {
-    // BX24 может быть undefined (SDK не подключился) либо null (SDK загрузился,
-    // но страница открыта вне портала — тогда у него нет контекста авторизации).
-    if (!window.BX24) {
-      reject(new B24Error('BX24 JS SDK недоступен. Откройте приложение внутри портала Битрикс24.'));
-      return;
-    }
+  if (ready) return ready;
+  ready = (async () => {
+    let resp;
     try {
-      window.BX24.init(() => resolve());
+      resp = await fetch('/api/whoami', { credentials: 'same-origin' });
     } catch (e) {
-      reject(new B24Error('Не удалось инициализировать BX24: ' + e.message));
+      throw new B24Error('Сетевая ошибка при обращении к серверу приложения: ' + e.message, 'NETWORK', e);
     }
-  });
-  return bx24Ready;
+    const json = await resp.json().catch(() => ({}));
+    if (!json.hasSession) {
+      throw new B24Error('Сессия портала не получена. Откройте приложение внутри портала Битрикс24.', 'NO_SESSION');
+    }
+  })();
+  return ready;
 }
 
 // --- Повторные попытки при сетевых сбоях ----------------------------------
 
-function sleep(ms) {
-  return new Promise((r) => setTimeout(r, ms));
-}
+function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
 async function withRetry(fn) {
   const { attempts, backoffMs } = CONFIG.retry;
@@ -665,7 +641,6 @@ async function withRetry(fn) {
       return await fn();
     } catch (e) {
       lastErr = e;
-      // Повторяем только транзиентные ошибки (сеть / 5xx / лимиты).
       if (!isTransient(e) || i === attempts - 1) throw e;
       await sleep(backoffMs[Math.min(i, backoffMs.length - 1)]);
     }
@@ -677,224 +652,75 @@ function isTransient(e) {
   if (e instanceof B24Error) {
     if (e.code === 'NETWORK') return true;
     if (typeof e.code === 'number' && e.code >= 500) return true;
-    if (e.code === 'QUERY_LIMIT_EXCEEDED' || e.code === 'OPERATION_TIME_LIMIT') return true;
+    if (e.code === 429 || e.code === 'QUERY_LIMIT_EXCEEDED' || e.code === 'OPERATION_TIME_LIMIT') return true;
     return false;
   }
-  return true; // неизвестные ошибки считаем транзиентными
+  return true;
 }
 
-// --- Низкоуровневый вызов одного метода -----------------------------------
+// --- Базовый запрос к BFF -------------------------------------------------
 
-// Возвращает «сырой» ответ: { result, total, next, error, error_description }.
-function rawCall(method, params) {
-  return isGateway() ? gatewayCall(method, params) : bx24Call(method, params);
-}
-
-function bx24Call(method, params) {
-  return new Promise((resolve, reject) => {
-    window.BX24.callMethod(method, params || {}, (res) => {
-      const err = res.error();
-      if (err) {
-        const code = (err.ex && err.ex.error) || err.error || 'ERROR';
-        const desc = (err.ex && err.ex.error_description) ||
-                     err.error_description || String(err);
-        reject(new B24Error(desc, code, err));
-        return;
-      }
-      resolve({
-        result: res.data(),
-        total: res.total ? res.total() : undefined,
-        // res.more()/res.next() обрабатываются в callListMethod
-        _res: res,
-      });
-    });
-  });
-}
-
-async function gatewayCall(method, params) {
-  const { baseUrl, callPath, accessKey } = CONFIG.gateway;
+// Ответ vibecode: { success, data, total, meta } либо { success:false, error }.
+async function request(path, { method = 'GET', query, body } = {}) {
+  let url = CONFIG.apiBase + path;
+  if (query) {
+    const qs = new URLSearchParams(query).toString();
+    if (qs) url += (path.includes('?') ? '&' : '?') + qs;
+  }
   let resp;
   try {
-    resp = await fetch(baseUrl + callPath, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': 'Bearer ' + accessKey,
-      },
-      body: JSON.stringify({ method, params: params || {} }),
+    resp = await fetch(url, {
+      method,
+      headers: body !== undefined ? { 'Content-Type': 'application/json' } : undefined,
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+      credentials: 'same-origin',
     });
   } catch (e) {
     throw new B24Error('Сетевая ошибка: ' + e.message, 'NETWORK', e);
   }
-  if (!resp.ok) {
-    const text = await resp.text().catch(() => '');
-    throw new B24Error(`HTTP ${resp.status}: ${text || resp.statusText}`, resp.status);
+  let json;
+  try { json = await resp.json(); } catch { json = null; }
+  if (!resp.ok || (json && json.success === false)) {
+    const err = (json && json.error) || {};
+    throw new B24Error(err.message || ('HTTP ' + resp.status), err.code || resp.status, json);
   }
-  const json = await resp.json().catch(() => ({}));
-  if (json.error) {
-    throw new B24Error(json.error_description || json.error, json.error, json);
-  }
-  return { result: json.result, total: json.total, next: json.next };
+  return json || {};
 }
 
-// Один вызов с ретраями. Возвращает result (массив/объект/значение).
-async function callMethod(method, params) {
-  const raw = await withRetry(() => rawCall(method, params));
-  return raw.result;
+// GET-запрос: возвращает массив data (списки) или объект data.
+async function apiGet(path, query) {
+  const json = await withRetry(() => request(path, { method: 'GET', query }));
+  return json.data !== undefined ? json.data : json;
 }
 
-// --- Списочный вызов с прокруткой страниц ----------------------------------
-// Собирает все страницы (user.get, tasks.task.list, calendar.event.get, ...).
-
-async function callListMethod(method, params, { resultKey } = {}) {
-  if (isGateway()) return gatewayList(method, params, resultKey);
-  return bx24List(method, params, resultKey);
+// POST/PATCH/DELETE с телом. Возвращает data.
+async function apiSend(path, method, body) {
+  const json = await withRetry(() => request(path, { method, body }));
+  return json.data !== undefined ? json.data : json;
 }
 
-function extractItems(result, resultKey) {
-  if (resultKey && result && typeof result === 'object') return result[resultKey] || [];
-  return Array.isArray(result) ? result : (result ? [result] : []);
-}
-
-function bx24List(method, params, resultKey) {
-  return withRetry(() => new Promise((resolve, reject) => {
-    const acc = [];
-    window.BX24.callMethod(method, params || {}, function handler(res) {
-      const err = res.error();
-      if (err) {
-        const code = (err.ex && err.ex.error) || err.error || 'ERROR';
-        const desc = (err.ex && err.ex.error_description) || err.error_description || String(err);
-        reject(new B24Error(desc, code, err));
-        return;
-      }
-      acc.push(...extractItems(res.data(), resultKey));
-      if (res.more && res.more()) {
-        res.next(); // вызовет handler снова со следующей страницей
-      } else {
-        resolve(acc);
-      }
-    });
-  }));
-}
-
-async function gatewayList(method, params, resultKey) {
-  const acc = [];
-  let start = 0;
-  // Защита от бесконечного цикла.
-  for (let guard = 0; guard < 1000; guard++) {
-    const p = { ...(params || {}), start };
-    const raw = await withRetry(() => gatewayCall(method, p));
-    acc.push(...extractItems(raw.result, resultKey));
-    if (raw.next === undefined || raw.next === null) break;
-    start = raw.next;
-  }
-  return acc;
-}
-
-// --- Батч-вызовы ----------------------------------------------------------
-// calls: { key: { method, params } }. Возвращает { key: result }.
-
-async function callBatch(calls) {
-  return isGateway() ? gatewayBatch(calls) : bx24Batch(calls);
-}
-
-function bx24Batch(calls) {
-  return withRetry(() => new Promise((resolve, reject) => {
-    const payload = {};
-    for (const [key, { method, params }] of Object.entries(calls)) {
-      payload[key] = [method, params || {}];
-    }
-    window.BX24.callBatch(payload, (results) => {
-      const out = {};
-      for (const key of Object.keys(calls)) {
-        const res = results[key];
-        if (!res) { out[key] = null; continue; }
-        if (res.error && res.error()) {
-          // Не валим весь батч из-за одной ошибки — отдаём null и логируем.
-          console.warn(`Батч-вызов «${key}» завершился ошибкой:`, res.error());
-          out[key] = null;
-        } else {
-          out[key] = res.data();
-        }
-      }
-      resolve(out);
-    }, false);
-  }));
-}
-
-async function gatewayBatch(calls) {
-  const { baseUrl, batchPath, accessKey } = CONFIG.gateway;
-  const cmd = {};
-  for (const [key, { method, params }] of Object.entries(calls)) {
-    const qs = new URLSearchParams(flatten(params || {})).toString();
-    cmd[key] = `${method}?${qs}`;
-  }
-  const raw = await withRetry(async () => {
-    let resp;
-    try {
-      resp = await fetch(baseUrl + batchPath, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + accessKey },
-        body: JSON.stringify({ halt: 0, cmd }),
-      });
-    } catch (e) {
-      throw new B24Error('Сетевая ошибка: ' + e.message, 'NETWORK', e);
-    }
-    if (!resp.ok) throw new B24Error(`HTTP ${resp.status}`, resp.status);
-    return resp.json();
-  });
-  const result = (raw.result && raw.result.result) || raw.result || {};
-  return result;
-}
-
-// Плоская сериализация параметров для query-строки батча.
-function flatten(obj, prefix = '', out = {}) {
-  for (const [k, v] of Object.entries(obj)) {
-    const key = prefix ? `${prefix}[${k}]` : k;
-    if (v !== null && typeof v === 'object') flatten(v, key, out);
-    else out[key] = v;
-  }
-  return out;
-}
-
-// --- Настройки приложения (на стороне портала) ----------------------------
-// В режиме bx24 используем BX24.appOption (общие для приложения настройки).
-// В режиме gateway — REST-методы app.option.get / app.option.set.
+// --- Настройки (выбор сотрудников) ----------------------------------------
+// Хранятся локально в браузере: токена для серверного хранилища у фронта нет,
+// а выбор по умолчанию — это пользовательское предпочтение на рабочем месте.
 
 async function getOption(key, fallback = null) {
   try {
-    if (isGateway()) {
-      const res = await callMethod('app.option.get', {});
-      const val = res && res[key];
-      return val !== undefined && val !== null ? val : fallback;
-    }
-    const val = window.BX24.appOption.get(key);
-    return val !== undefined && val !== null && val !== '' ? val : fallback;
-  } catch (e) {
-    console.warn('Не удалось прочитать настройку', key, e);
+    const v = localStorage.getItem(key);
+    return v !== null && v !== '' ? v : fallback;
+  } catch {
     return fallback;
   }
 }
 
 async function setOption(key, value) {
-  if (isGateway()) {
-    await callMethod('app.option.set', { options: { [key]: value } });
-    return;
-  }
-  await new Promise((resolve, reject) => {
-    try {
-      window.BX24.appOption.set(key, value, () => resolve());
-    } catch (e) {
-      reject(new B24Error('Не удалось сохранить настройку: ' + e.message));
-    }
-  });
+  try { localStorage.setItem(key, value); } catch (e) { /* приватный режим — игнорируем */ }
 }
 
 
 
 // ===== js/data.js =====
-// Доменный слой: загрузка и сохранение сущностей Битрикс24, приведение их к
-// единой модели «item», с которой работает календарь.
+// Доменный слой: загрузка и сохранение сущностей Битрикс24 через BFF
+// (REST vibecode), с приведением их к единой модели «item».
 //
 // Единая модель:
 //   { id, kind: 'task'|'event'|'absence', userId,
@@ -902,27 +728,42 @@ async function setOption(key, value) {
 //     status, hoursFact, hoursPlan, hoursToday, allDay, raw }
 
 
+function asArray(data) {
+  if (Array.isArray(data)) return data;
+  if (data && Array.isArray(data.items)) return data.items;
+  if (data && Array.isArray(data.tasks)) return data.tasks;
+  if (data && Array.isArray(data.events)) return data.events;
+  return [];
+}
+
 // --- Сотрудники -----------------------------------------------------------
 
 async function loadUsers() {
-  // Минимальный, максимально совместимый вызов user.get: без SORT/ORDER/FILTER
-  // в запросе — некоторые порталы Битрикс24 отвечают на них 400 Bad Request
-  // (а BX24 JS SDK на ошибочный HTTP-статус не вызывает колбэк, и попап «висел»
-  // до таймаута). Неактивных отсеиваем и сортируем на стороне клиента.
-  const rows = await callListMethod('user.get', {});
+  // limit достаточно большой — vibecode пагинирует сам; неактивных и сортировку
+  // обрабатываем на клиенте (так надёжнее межпортально).
+  const rows = asArray(await apiGet('/users', {
+    select: 'ID,NAME,LAST_NAME,WORK_POSITION,PERSONAL_PHOTO,ACTIVE,EMAIL',
+    limit: 500,
+  }));
   return rows
-    .filter((u) => u && u.ID && u.ACTIVE !== false && u.ACTIVE !== 'N')
-    .map((u) => ({
-      id: String(u.ID),
-      name: [u.LAST_NAME, u.NAME].filter(Boolean).join(' ').trim() ||
-            u.NAME || u.EMAIL || ('ID ' + u.ID),
-      position: u.WORK_POSITION || '',
-      photo: u.PERSONAL_PHOTO || '',
-    }))
+    .filter((u) => u && (u.ID || u.id) &&
+      u.ACTIVE !== false && u.ACTIVE !== 'N' && u.active !== false)
+    .map((u) => {
+      const last = u.LAST_NAME || u.lastName || '';
+      const first = u.NAME || u.name || '';
+      const name = [last, first].filter(Boolean).join(' ').trim() ||
+        first || u.EMAIL || u.email || ('ID ' + (u.ID || u.id));
+      return {
+        id: String(u.ID || u.id),
+        name,
+        position: u.WORK_POSITION || u.workPosition || '',
+        photo: u.PERSONAL_PHOTO || u.personalPhoto || '',
+      };
+    })
     .sort((a, b) => a.name.localeCompare(b.name, 'ru'));
 }
 
-// --- Настройки приложения -------------------------------------------------
+// --- Настройки приложения (выбор сотрудников, локально) -------------------
 
 async function loadSelectedUserIds() {
   const raw = await getOption(OPTION_KEYS.selectedUsers, '[]');
@@ -935,16 +776,15 @@ async function loadSelectedUserIds() {
 }
 
 async function saveSelectedUserIds(ids) {
-  const limited = ids.map(String).slice(0, GRID.maxEmployees);
-  await setOption(OPTION_KEYS.selectedUsers, JSON.stringify(limited));
+  await setOption(OPTION_KEYS.selectedUsers, JSON.stringify(ids.map(String).slice(0, GRID.maxEmployees)));
 }
 
 // --- Загрузка данных недели ------------------------------------------------
 
 const TASK_SELECT = [
-  'ID', 'TITLE', 'STATUS', 'RESPONSIBLE_ID', 'DESCRIPTION',
-  'DEADLINE', 'START_DATE_PLAN', 'END_DATE_PLAN',
-  'TIME_ESTIMATE', 'TIME_SPENT_IN_LOGS',
+  'id', 'title', 'status', 'responsibleId', 'description',
+  'deadline', 'startDatePlan', 'endDatePlan',
+  'timeEstimate', 'timeSpentInLogs',
 ];
 
 // Загружает задачи, события и отсутствия для всех сотрудников за неделю.
@@ -953,71 +793,59 @@ async function loadWeekData(userIds, weekDate) {
   const range = weekRangeB24(weekDate);
   const byUser = new Map(userIds.map((id) => [String(id), []]));
 
-  // Формируем батч: на каждого сотрудника — задачи (по плану и по дедлайну)
-  // и события календаря.
-  const calls = {};
-  for (const id of userIds) {
-    calls[`task_plan_${id}`] = {
-      method: 'tasks.task.list',
-      params: {
-        filter: {
-          RESPONSIBLE_ID: id,
-          '>=START_DATE_PLAN': range.from,
-          '<=START_DATE_PLAN': range.to,
-        },
-        select: TASK_SELECT,
-      },
-    };
-    calls[`task_dl_${id}`] = {
-      method: 'tasks.task.list',
-      params: {
-        filter: {
-          RESPONSIBLE_ID: id,
-          '>=DEADLINE': range.from,
-          '<=DEADLINE': range.to,
-        },
-        select: TASK_SELECT,
-      },
-    };
-    calls[`events_${id}`] = {
-      method: 'calendar.event.get',
-      params: { type: 'user', ownerId: id, from: range.from, to: range.to },
-    };
-  }
-
-  const results = await callBatch(calls);
-
-  for (const id of userIds) {
+  await Promise.all(userIds.map(async (id) => {
     const sid = String(id);
     const items = byUser.get(sid);
 
-    // Задачи: объединяем два набора и убираем дубли по ID.
+    const [planTasks, dlTasks, events] = await Promise.all([
+      searchTasks({ responsibleId: id, '>=startDatePlan': range.from, '<=startDatePlan': range.to }),
+      searchTasks({ responsibleId: id, '>=deadline': range.from, '<=deadline': range.to }),
+      loadUserEvents(id, range),
+    ]);
+
+    // Задачи: объединяем два набора и убираем дубли по id.
     const taskMap = new Map();
-    for (const key of [`task_plan_${id}`, `task_dl_${id}`]) {
-      const res = results[key];
-      const tasks = (res && (res.tasks || res)) || [];
-      for (const t of (Array.isArray(tasks) ? tasks : [])) {
-        if (t && t.id != null) taskMap.set(String(t.id), t);
-        else if (t && t.ID != null) taskMap.set(String(t.ID), t);
-      }
+    for (const t of [...planTasks, ...dlTasks]) {
+      const tid = t.id != null ? t.id : t.ID;
+      if (tid != null) taskMap.set(String(tid), t);
     }
     for (const t of taskMap.values()) {
       const item = mapTask(t, sid);
       if (item) items.push(item);
     }
 
-    // События календаря -> события / отсутствия.
-    const events = results[`events_${id}`] || [];
-    for (const e of (Array.isArray(events) ? events : [])) {
+    for (const e of events) {
       const item = mapEvent(e, sid);
       if (item) items.push(item);
     }
-  }
+  }));
 
-  // Доводим «часы за сегодня» для видимых задач.
   await enrichTodayLogged(byUser);
-
   return byUser;
+}
+
+async function searchTasks(filter) {
+  try {
+    const data = await apiSend('/tasks/search', 'POST', {
+      filter, select: TASK_SELECT, limit: 200,
+    });
+    return asArray(data);
+  } catch (e) {
+    console.warn('Не удалось загрузить задачи:', e);
+    return [];
+  }
+}
+
+async function loadUserEvents(id, range) {
+  try {
+    const data = await apiGet('/calendar-events', {
+      type: 'user', ownerId: id, from: range.from, to: range.to,
+    });
+    return asArray(data);
+  } catch (e) {
+    console.warn('Не удалось загрузить события календаря:', e);
+    return [];
+  }
 }
 
 function mapTask(t, userId) {
@@ -1031,15 +859,14 @@ function mapTask(t, userId) {
     start = planStart;
     end = planEnd;
   } else if (deadline) {
-    // Без планового интервала — 30-минутный блок, заканчивающийся дедлайном.
     end = deadline;
     start = new Date(deadline.getTime() - GRID.slotMinutes * 60 * 1000);
   } else {
-    return null; // нечего размещать на сетке
+    return null;
   }
 
-  const statusCode = Number(t.status || t.STATUS);
-  const status = resolveTaskStatus(statusCode, deadline);
+  const code = toStatusCode(t.status != null ? t.status : t.STATUS);
+  const status = resolveTaskStatus(code, deadline);
   const timeEstimate = Number(t.timeEstimate || t.TIME_ESTIMATE || 0);
   const timeSpent = Number(t.timeSpentInLogs || t.TIME_SPENT_IN_LOGS || 0);
 
@@ -1055,9 +882,28 @@ function mapTask(t, userId) {
     status,
     hoursPlan: secondsToHours(timeEstimate),
     hoursFact: secondsToHours(timeSpent),
-    hoursToday: 0, // заполняется в enrichTodayLogged
+    hoursToday: 0,
     raw: t,
   };
+}
+
+// Статус приходит числом (1..7) либо строкой-перечислением — нормализуем.
+const STATUS_STRING_TO_CODE = {
+  pending: 2, new: 2,
+  inprogress: 3, in_progress: 3,
+  supposedlycompleted: 4, almostdone: 4,
+  completed: 5, complete: 5, done: 5,
+  deferred: 6, paused: 6,
+  declined: 7,
+};
+
+function toStatusCode(raw) {
+  if (raw == null) return NaN;
+  if (typeof raw === 'number') return raw;
+  const n = Number(raw);
+  if (!Number.isNaN(n)) return n;
+  return STATUS_STRING_TO_CODE[String(raw).toLowerCase().replace(/[\s-]/g, '_')] ||
+         STATUS_STRING_TO_CODE[String(raw).toLowerCase().replace(/[\s_-]/g, '')] || NaN;
 }
 
 function resolveTaskStatus(code, deadline) {
@@ -1073,21 +919,21 @@ function resolveTaskStatus(code, deadline) {
 }
 
 function mapEvent(e, userId) {
-  const start = parseB24Date(e.DATE_FROM || e.dateFrom);
-  const end = parseB24Date(e.DATE_TO || e.dateTo);
+  const start = parseB24Date(e.dateFrom || e.DATE_FROM || e.from);
+  const end = parseB24Date(e.dateTo || e.DATE_TO || e.to);
   if (!start || !end) return null;
 
-  const accessibility = (e.ACCESSIBILITY || e.accessibility || '').toLowerCase();
+  const accessibility = String(e.accessibility || e.ACCESSIBILITY || '').toLowerCase();
   const isAbsence = accessibility === 'absent';
-  const skipTime = (e.SKIP_TIME || e.skipTime) === 'Y';
+  const skipTime = (e.skipTime || e.SKIP_TIME) === 'Y' || e.skipTime === true;
 
   return {
-    id: (isAbsence ? 'absence_' : 'event_') + (e.ID || e.id),
-    rawId: String(e.ID || e.id),
+    id: (isAbsence ? 'absence_' : 'event_') + (e.id || e.ID),
+    rawId: String(e.id || e.ID),
     kind: isAbsence ? 'absence' : 'event',
     userId,
-    title: e.NAME || e.name || (isAbsence ? 'Отсутствие' : 'Событие'),
-    description: e.DESCRIPTION || e.description || '',
+    title: e.name || e.NAME || (isAbsence ? 'Отсутствие' : 'Событие'),
+    description: e.description || e.DESCRIPTION || '',
     start, end,
     allDay: skipTime,
     status: null,
@@ -1096,7 +942,7 @@ function mapEvent(e, userId) {
   };
 }
 
-// Заполняет hoursToday для задач (время, залогированное сегодня).
+// Заполняет hoursToday для задач (время, залогированное сегодня). Best-effort.
 async function enrichTodayLogged(byUser) {
   const todayStart = startOfDay(new Date());
   const todayEnd = addDays(todayStart, 1);
@@ -1107,116 +953,95 @@ async function enrichTodayLogged(byUser) {
   }
   if (taskItems.length === 0) return;
 
-  // Батчим запросы списков затраченного времени порциями по 50.
-  const chunks = [];
-  for (let i = 0; i < taskItems.length; i += 50) chunks.push(taskItems.slice(i, i + 50));
-
-  for (const chunk of chunks) {
-    const calls = {};
-    for (const it of chunk) {
-      calls['e_' + it.rawId] = {
-        method: 'task.elapseditem.getlist',
-        params: {
-          ORDER: { ID: 'ASC' },
-          FILTER: {
-            TASK_ID: it.rawId,
-            '>=CREATED_DATE': toB24DateTime(todayStart),
-            '<CREATED_DATE': toB24DateTime(todayEnd),
-          },
-        },
-      };
-    }
-    let results;
+  await Promise.all(taskItems.map(async (it) => {
     try {
-      results = await callBatch(calls);
-    } catch (e) {
-      console.warn('Не удалось получить часы за сегодня:', e);
-      return; // не критично — просто оставим 0
-    }
-    for (const it of chunk) {
-      const rows = results['e_' + it.rawId];
-      if (!Array.isArray(rows)) continue;
-      const sec = rows.reduce((s, r) => s + Number(r.SECONDS || r.seconds || 0), 0);
+      const rows = asArray(await apiGet('/tasks/' + it.rawId + '/time'));
+      let sec = 0;
+      for (const r of rows) {
+        const created = parseB24Date(r.createdDate || r.CREATED_DATE || r.createdAt);
+        if (created && created >= todayStart && created < todayEnd) {
+          sec += Number(r.seconds || r.SECONDS || 0);
+        }
+      }
       it.hoursToday = secondsToHours(sec);
-    }
-  }
+    } catch (e) { /* не критично — оставим 0 */ }
+  }));
 }
 
 // --- Создание и обновление сущностей --------------------------------------
 
 async function createTask({ title, userId, description, start, end, hoursPlan }) {
-  const fields = {
-    TITLE: title,
-    RESPONSIBLE_ID: userId,
-    DESCRIPTION: description || '',
-  };
-  if (start) fields.START_DATE_PLAN = toB24DateTime(start);
+  const body = { title, responsibleId: userId, description: description || '' };
+  if (start) body.startDatePlan = toB24DateTime(start);
   if (end) {
-    fields.END_DATE_PLAN = toB24DateTime(end);
-    fields.DEADLINE = toB24DateTime(end);
+    body.endDatePlan = toB24DateTime(end);
+    body.deadline = toB24DateTime(end);
   }
-  if (hoursPlan) fields.TIME_ESTIMATE = Math.round(Number(hoursPlan) * 3600);
-  return callMethod('tasks.task.add', { fields });
+  if (hoursPlan) body.timeEstimate = Math.round(Number(hoursPlan) * 3600);
+  return apiSend('/tasks', 'POST', body);
 }
 
 async function updateTask(rawId, { title, description, start, end, hoursPlan, status }) {
-  const fields = {};
-  if (title != null) fields.TITLE = title;
-  if (description != null) fields.DESCRIPTION = description;
-  if (start) fields.START_DATE_PLAN = toB24DateTime(start);
+  const body = {};
+  if (title != null) body.title = title;
+  if (description != null) body.description = description;
+  if (start) body.startDatePlan = toB24DateTime(start);
   if (end) {
-    fields.END_DATE_PLAN = toB24DateTime(end);
-    fields.DEADLINE = toB24DateTime(end);
+    body.endDatePlan = toB24DateTime(end);
+    body.deadline = toB24DateTime(end);
   }
-  if (hoursPlan != null && hoursPlan !== '') fields.TIME_ESTIMATE = Math.round(Number(hoursPlan) * 3600);
-  if (status != null) fields.STATUS = status;
-  return callMethod('tasks.task.update', { taskId: rawId, fields });
+  if (hoursPlan != null && hoursPlan !== '') body.timeEstimate = Math.round(Number(hoursPlan) * 3600);
+  if (status != null) body.status = status;
+  return apiSend('/tasks/' + rawId, 'PATCH', body);
 }
 
 // Привязать существующую задачу к слоту = задать плановые даты.
 async function attachTaskToSlot(rawId, start, end) {
-  return callMethod('tasks.task.update', {
-    taskId: rawId,
-    fields: {
-      START_DATE_PLAN: toB24DateTime(start),
-      END_DATE_PLAN: toB24DateTime(end),
-    },
+  return apiSend('/tasks/' + rawId, 'PATCH', {
+    startDatePlan: toB24DateTime(start),
+    endDatePlan: toB24DateTime(end),
   });
 }
 
 // Список задач сотрудника для привязки (активные, не завершённые).
 async function loadUserTasksForPick(userId) {
-  const res = await callListMethod('tasks.task.list', {
-    filter: { RESPONSIBLE_ID: userId, '<STATUS': 5 },
-    select: ['ID', 'TITLE', 'STATUS', 'DEADLINE'],
-    order: { ID: 'DESC' },
-  }, { resultKey: 'tasks' });
-  return (res || []).map((t) => ({
-    id: String(t.id || t.ID),
-    title: t.title || t.TITLE || 'Без названия',
-  }));
+  const data = await apiSend('/tasks/search', 'POST', {
+    filter: { responsibleId: userId },
+    select: ['id', 'title', 'status', 'deadline'],
+    order: { id: 'desc' },
+    limit: 200,
+  });
+  return asArray(data)
+    .filter((t) => {
+      const code = toStatusCode(t.status != null ? t.status : t.STATUS);
+      return Number.isNaN(code) || code < 5; // прячем завершённые, если статус понятен
+    })
+    .map((t) => ({
+      id: String(t.id || t.ID),
+      title: t.title || t.TITLE || 'Без названия',
+    }));
 }
 
 async function createEvent({ name, userId, description, start, end, kind }) {
-  return callMethod('calendar.event.add', {
+  return apiSend('/calendar-events', 'POST', {
     type: 'user',
     ownerId: userId,
-    from: toB24DateTime(start),
-    to: toB24DateTime(end),
     name,
     description: description || '',
+    dateFrom: toB24DateTime(start),
+    dateTo: toB24DateTime(end),
     accessibility: kind === 'absence' ? 'absent' : 'busy',
   });
 }
 
 async function updateEvent(rawId, userId, { name, description, start, end, kind }) {
-  const params = { id: rawId, type: 'user', ownerId: userId };
-  if (name != null) params.name = name;
-  if (description != null) params.description = description;
-  if (start) params.from = toB24DateTime(start);
-  if (end) params.to = toB24DateTime(end);
-  if (kind) params.accessibility = kind === 'absence' ? 'absent' : 'busy';
-  return callMethod('calendar.event.update', params);
+  const body = { type: 'user', ownerId: userId };
+  if (name != null) body.name = name;
+  if (description != null) body.description = description;
+  if (start) body.dateFrom = toB24DateTime(start);
+  if (end) body.dateTo = toB24DateTime(end);
+  if (kind) body.accessibility = kind === 'absence' ? 'absent' : 'busy';
+  return apiSend('/calendar-events/' + rawId, 'PATCH', body);
 }
 
 

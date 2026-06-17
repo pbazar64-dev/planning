@@ -1,13 +1,11 @@
-// Транспортный слой к Битрикс24.
+// Транспортный слой к REST Битрикс24 через собственный BFF.
 //
-// Один интерфейс — два режима:
-//   * 'bx24'    — встраиваемое приложение через глобальный BX24 JS SDK
-//                 (подключается в index.html как //api.bitrix24.com/api/v1/).
-//   * 'gateway' — standalone через REST-шлюз vibecode с Bearer-ключом.
+// Схема vibecode: шлюз авторизует пользователя портала и на пути «шлюз ->
+// сервер приложения» подставляет заголовок сессии. Браузер токен не видит,
+// поэтому фронтенд обращается к нашему бэкенду `/api/v1/*` (server/bff.py),
+// а тот уже проксирует на REST vibecode (`/v1/*`) с этой сессией.
 //
-// Наружу отдаём небольшой набор функций: init, callMethod, callListMethod,
-// callBatch, getOption, setOption. Весь специфичный для шлюза HTTP-контракт
-// сосредоточен здесь — если формат эндпоинта отличается, правится одно место.
+// Наружу отдаём: init, apiGet, apiSend, getOption, setOption, OPTION_KEYS.
 
 import { CONFIG, OPTION_KEYS } from './config.js';
 
@@ -20,37 +18,30 @@ export class B24Error extends Error {
   }
 }
 
-const isGateway = () => CONFIG.transport === 'gateway';
+// --- Инициализация: проверяем, что шлюз отдал сессию --------------------
 
-// --- Инициализация -------------------------------------------------------
-
-let bx24Ready = null;
+let ready = null;
 
 export function init() {
-  if (isGateway()) return Promise.resolve();
-  if (bx24Ready) return bx24Ready;
-
-  bx24Ready = new Promise((resolve, reject) => {
-    // BX24 может быть undefined (SDK не подключился) либо null (SDK загрузился,
-    // но страница открыта вне портала — тогда у него нет контекста авторизации).
-    if (!window.BX24) {
-      reject(new B24Error('BX24 JS SDK недоступен. Откройте приложение внутри портала Битрикс24.'));
-      return;
-    }
+  if (ready) return ready;
+  ready = (async () => {
+    let resp;
     try {
-      window.BX24.init(() => resolve());
+      resp = await fetch('/api/whoami', { credentials: 'same-origin' });
     } catch (e) {
-      reject(new B24Error('Не удалось инициализировать BX24: ' + e.message));
+      throw new B24Error('Сетевая ошибка при обращении к серверу приложения: ' + e.message, 'NETWORK', e);
     }
-  });
-  return bx24Ready;
+    const json = await resp.json().catch(() => ({}));
+    if (!json.hasSession) {
+      throw new B24Error('Сессия портала не получена. Откройте приложение внутри портала Битрикс24.', 'NO_SESSION');
+    }
+  })();
+  return ready;
 }
 
 // --- Повторные попытки при сетевых сбоях ----------------------------------
 
-function sleep(ms) {
-  return new Promise((r) => setTimeout(r, ms));
-}
+function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
 async function withRetry(fn) {
   const { attempts, backoffMs } = CONFIG.retry;
@@ -60,7 +51,6 @@ async function withRetry(fn) {
       return await fn();
     } catch (e) {
       lastErr = e;
-      // Повторяем только транзиентные ошибки (сеть / 5xx / лимиты).
       if (!isTransient(e) || i === attempts - 1) throw e;
       await sleep(backoffMs[Math.min(i, backoffMs.length - 1)]);
     }
@@ -72,217 +62,68 @@ function isTransient(e) {
   if (e instanceof B24Error) {
     if (e.code === 'NETWORK') return true;
     if (typeof e.code === 'number' && e.code >= 500) return true;
-    if (e.code === 'QUERY_LIMIT_EXCEEDED' || e.code === 'OPERATION_TIME_LIMIT') return true;
+    if (e.code === 429 || e.code === 'QUERY_LIMIT_EXCEEDED' || e.code === 'OPERATION_TIME_LIMIT') return true;
     return false;
   }
-  return true; // неизвестные ошибки считаем транзиентными
+  return true;
 }
 
-// --- Низкоуровневый вызов одного метода -----------------------------------
+// --- Базовый запрос к BFF -------------------------------------------------
 
-// Возвращает «сырой» ответ: { result, total, next, error, error_description }.
-function rawCall(method, params) {
-  return isGateway() ? gatewayCall(method, params) : bx24Call(method, params);
-}
-
-function bx24Call(method, params) {
-  return new Promise((resolve, reject) => {
-    window.BX24.callMethod(method, params || {}, (res) => {
-      const err = res.error();
-      if (err) {
-        const code = (err.ex && err.ex.error) || err.error || 'ERROR';
-        const desc = (err.ex && err.ex.error_description) ||
-                     err.error_description || String(err);
-        reject(new B24Error(desc, code, err));
-        return;
-      }
-      resolve({
-        result: res.data(),
-        total: res.total ? res.total() : undefined,
-        // res.more()/res.next() обрабатываются в callListMethod
-        _res: res,
-      });
-    });
-  });
-}
-
-async function gatewayCall(method, params) {
-  const { baseUrl, callPath, accessKey } = CONFIG.gateway;
+// Ответ vibecode: { success, data, total, meta } либо { success:false, error }.
+async function request(path, { method = 'GET', query, body } = {}) {
+  let url = CONFIG.apiBase + path;
+  if (query) {
+    const qs = new URLSearchParams(query).toString();
+    if (qs) url += (path.includes('?') ? '&' : '?') + qs;
+  }
   let resp;
   try {
-    resp = await fetch(baseUrl + callPath, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': 'Bearer ' + accessKey,
-      },
-      body: JSON.stringify({ method, params: params || {} }),
+    resp = await fetch(url, {
+      method,
+      headers: body !== undefined ? { 'Content-Type': 'application/json' } : undefined,
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+      credentials: 'same-origin',
     });
   } catch (e) {
     throw new B24Error('Сетевая ошибка: ' + e.message, 'NETWORK', e);
   }
-  if (!resp.ok) {
-    const text = await resp.text().catch(() => '');
-    throw new B24Error(`HTTP ${resp.status}: ${text || resp.statusText}`, resp.status);
+  let json;
+  try { json = await resp.json(); } catch { json = null; }
+  if (!resp.ok || (json && json.success === false)) {
+    const err = (json && json.error) || {};
+    throw new B24Error(err.message || ('HTTP ' + resp.status), err.code || resp.status, json);
   }
-  const json = await resp.json().catch(() => ({}));
-  if (json.error) {
-    throw new B24Error(json.error_description || json.error, json.error, json);
-  }
-  return { result: json.result, total: json.total, next: json.next };
+  return json || {};
 }
 
-// Один вызов с ретраями. Возвращает result (массив/объект/значение).
-export async function callMethod(method, params) {
-  const raw = await withRetry(() => rawCall(method, params));
-  return raw.result;
+// GET-запрос: возвращает массив data (списки) или объект data.
+export async function apiGet(path, query) {
+  const json = await withRetry(() => request(path, { method: 'GET', query }));
+  return json.data !== undefined ? json.data : json;
 }
 
-// --- Списочный вызов с прокруткой страниц ----------------------------------
-// Собирает все страницы (user.get, tasks.task.list, calendar.event.get, ...).
-
-export async function callListMethod(method, params, { resultKey } = {}) {
-  if (isGateway()) return gatewayList(method, params, resultKey);
-  return bx24List(method, params, resultKey);
+// POST/PATCH/DELETE с телом. Возвращает data.
+export async function apiSend(path, method, body) {
+  const json = await withRetry(() => request(path, { method, body }));
+  return json.data !== undefined ? json.data : json;
 }
 
-function extractItems(result, resultKey) {
-  if (resultKey && result && typeof result === 'object') return result[resultKey] || [];
-  return Array.isArray(result) ? result : (result ? [result] : []);
-}
-
-function bx24List(method, params, resultKey) {
-  return withRetry(() => new Promise((resolve, reject) => {
-    const acc = [];
-    window.BX24.callMethod(method, params || {}, function handler(res) {
-      const err = res.error();
-      if (err) {
-        const code = (err.ex && err.ex.error) || err.error || 'ERROR';
-        const desc = (err.ex && err.ex.error_description) || err.error_description || String(err);
-        reject(new B24Error(desc, code, err));
-        return;
-      }
-      acc.push(...extractItems(res.data(), resultKey));
-      if (res.more && res.more()) {
-        res.next(); // вызовет handler снова со следующей страницей
-      } else {
-        resolve(acc);
-      }
-    });
-  }));
-}
-
-async function gatewayList(method, params, resultKey) {
-  const acc = [];
-  let start = 0;
-  // Защита от бесконечного цикла.
-  for (let guard = 0; guard < 1000; guard++) {
-    const p = { ...(params || {}), start };
-    const raw = await withRetry(() => gatewayCall(method, p));
-    acc.push(...extractItems(raw.result, resultKey));
-    if (raw.next === undefined || raw.next === null) break;
-    start = raw.next;
-  }
-  return acc;
-}
-
-// --- Батч-вызовы ----------------------------------------------------------
-// calls: { key: { method, params } }. Возвращает { key: result }.
-
-export async function callBatch(calls) {
-  return isGateway() ? gatewayBatch(calls) : bx24Batch(calls);
-}
-
-function bx24Batch(calls) {
-  return withRetry(() => new Promise((resolve, reject) => {
-    const payload = {};
-    for (const [key, { method, params }] of Object.entries(calls)) {
-      payload[key] = [method, params || {}];
-    }
-    window.BX24.callBatch(payload, (results) => {
-      const out = {};
-      for (const key of Object.keys(calls)) {
-        const res = results[key];
-        if (!res) { out[key] = null; continue; }
-        if (res.error && res.error()) {
-          // Не валим весь батч из-за одной ошибки — отдаём null и логируем.
-          console.warn(`Батч-вызов «${key}» завершился ошибкой:`, res.error());
-          out[key] = null;
-        } else {
-          out[key] = res.data();
-        }
-      }
-      resolve(out);
-    }, false);
-  }));
-}
-
-async function gatewayBatch(calls) {
-  const { baseUrl, batchPath, accessKey } = CONFIG.gateway;
-  const cmd = {};
-  for (const [key, { method, params }] of Object.entries(calls)) {
-    const qs = new URLSearchParams(flatten(params || {})).toString();
-    cmd[key] = `${method}?${qs}`;
-  }
-  const raw = await withRetry(async () => {
-    let resp;
-    try {
-      resp = await fetch(baseUrl + batchPath, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + accessKey },
-        body: JSON.stringify({ halt: 0, cmd }),
-      });
-    } catch (e) {
-      throw new B24Error('Сетевая ошибка: ' + e.message, 'NETWORK', e);
-    }
-    if (!resp.ok) throw new B24Error(`HTTP ${resp.status}`, resp.status);
-    return resp.json();
-  });
-  const result = (raw.result && raw.result.result) || raw.result || {};
-  return result;
-}
-
-// Плоская сериализация параметров для query-строки батча.
-function flatten(obj, prefix = '', out = {}) {
-  for (const [k, v] of Object.entries(obj)) {
-    const key = prefix ? `${prefix}[${k}]` : k;
-    if (v !== null && typeof v === 'object') flatten(v, key, out);
-    else out[key] = v;
-  }
-  return out;
-}
-
-// --- Настройки приложения (на стороне портала) ----------------------------
-// В режиме bx24 используем BX24.appOption (общие для приложения настройки).
-// В режиме gateway — REST-методы app.option.get / app.option.set.
+// --- Настройки (выбор сотрудников) ----------------------------------------
+// Хранятся локально в браузере: токена для серверного хранилища у фронта нет,
+// а выбор по умолчанию — это пользовательское предпочтение на рабочем месте.
 
 export async function getOption(key, fallback = null) {
   try {
-    if (isGateway()) {
-      const res = await callMethod('app.option.get', {});
-      const val = res && res[key];
-      return val !== undefined && val !== null ? val : fallback;
-    }
-    const val = window.BX24.appOption.get(key);
-    return val !== undefined && val !== null && val !== '' ? val : fallback;
-  } catch (e) {
-    console.warn('Не удалось прочитать настройку', key, e);
+    const v = localStorage.getItem(key);
+    return v !== null && v !== '' ? v : fallback;
+  } catch {
     return fallback;
   }
 }
 
 export async function setOption(key, value) {
-  if (isGateway()) {
-    await callMethod('app.option.set', { options: { [key]: value } });
-    return;
-  }
-  await new Promise((resolve, reject) => {
-    try {
-      window.BX24.appOption.set(key, value, () => resolve());
-    } catch (e) {
-      reject(new B24Error('Не удалось сохранить настройку: ' + e.message));
-    }
-  });
+  try { localStorage.setItem(key, value); } catch (e) { /* приватный режим — игнорируем */ }
 }
 
 export { OPTION_KEYS };
