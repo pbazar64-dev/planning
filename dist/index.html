@@ -905,20 +905,21 @@ async function setOption(key, value) {
 // --- Сотрудники -----------------------------------------------------------
 
 async function loadUsers() {
-  const rows = await callListMethod('user.get', {
-    sort: 'LAST_NAME',
-    order: 'ASC',
-    FILTER: { ACTIVE: true },
-  });
+  // Минимальный, максимально совместимый вызов user.get: без SORT/ORDER/FILTER
+  // в запросе — некоторые порталы Битрикс24 отвечают на них 400 Bad Request
+  // (а BX24 JS SDK на ошибочный HTTP-статус не вызывает колбэк, и попап «висел»
+  // до таймаута). Неактивных отсеиваем и сортируем на стороне клиента.
+  const rows = await callListMethod('user.get', {});
   return rows
-    .filter((u) => u && u.ID)
+    .filter((u) => u && u.ID && u.ACTIVE !== false && u.ACTIVE !== 'N')
     .map((u) => ({
       id: String(u.ID),
       name: [u.LAST_NAME, u.NAME].filter(Boolean).join(' ').trim() ||
             u.NAME || u.EMAIL || ('ID ' + u.ID),
       position: u.WORK_POSITION || '',
       photo: u.PERSONAL_PHOTO || '',
-    }));
+    }))
+    .sort((a, b) => a.name.localeCompare(b.name, 'ru'));
 }
 
 // --- Настройки приложения -------------------------------------------------
