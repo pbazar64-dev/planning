@@ -739,28 +739,30 @@ function asArray(data) {
 // --- Сотрудники -----------------------------------------------------------
 
 async function loadUsers() {
-  // limit достаточно большой — vibecode пагинирует сам; неактивных и сортировку
-  // обрабатываем на клиенте (так надёжнее межпортально).
-  const rows = asArray(await apiGet('/users', {
-    select: 'ID,NAME,LAST_NAME,WORK_POSITION,PERSONAL_PHOTO,ACTIVE,EMAIL',
-    limit: 500,
-  }));
+  // Без select — забираем полные записи (поля у vibecode в camelCase: id, name,
+  // lastName, …). limit большой: vibecode пагинирует сам. Неактивных и
+  // сортировку обрабатываем на клиенте.
+  const rows = asArray(await apiGet('/users', { limit: 500 }));
   return rows
-    .filter((u) => u && (u.ID || u.id) &&
-      u.ACTIVE !== false && u.ACTIVE !== 'N' && u.active !== false)
-    .map((u) => {
-      const last = u.LAST_NAME || u.lastName || '';
-      const first = u.NAME || u.name || '';
-      const name = [last, first].filter(Boolean).join(' ').trim() ||
-        first || u.EMAIL || u.email || ('ID ' + (u.ID || u.id));
-      return {
-        id: String(u.ID || u.id),
-        name,
-        position: u.WORK_POSITION || u.workPosition || '',
-        photo: u.PERSONAL_PHOTO || u.personalPhoto || '',
-      };
-    })
+    .filter((u) => u && (u.id || u.ID) &&
+      u.active !== false && u.ACTIVE !== false && u.ACTIVE !== 'N')
+    .map((u) => ({
+      id: String(u.id || u.ID),
+      name: userName(u),
+      position: u.workPosition || u.WORK_POSITION || u.position || '',
+      photo: u.personalPhoto || u.PERSONAL_PHOTO || u.photo || '',
+    }))
     .sort((a, b) => a.name.localeCompare(b.name, 'ru'));
+}
+
+// Собирает «Фамилия Имя» из любых доступных полей записи сотрудника.
+function userName(u) {
+  const last = u.lastName || u.LAST_NAME || '';
+  const first = u.firstName || u.name || u.NAME || '';
+  const combined = [last, first].filter(Boolean).join(' ').trim();
+  return combined ||
+    u.fullName || u.displayName || u.title ||
+    u.email || u.EMAIL || ('ID ' + (u.id || u.ID));
 }
 
 // --- Настройки приложения (выбор сотрудников, локально) -------------------
