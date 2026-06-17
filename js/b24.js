@@ -31,8 +31,10 @@ export function init() {
   if (bx24Ready) return bx24Ready;
 
   bx24Ready = new Promise((resolve, reject) => {
-    if (typeof window.BX24 === 'undefined') {
-      reject(new B24Error('BX24 JS SDK не загружен. Откройте приложение внутри портала Битрикс24.'));
+    // BX24 может быть undefined (SDK не подключился) либо null (SDK загрузился,
+    // но страница открыта вне портала — тогда у него нет контекста авторизации).
+    if (!window.BX24) {
+      reject(new B24Error('BX24 JS SDK недоступен. Откройте приложение внутри портала Битрикс24.'));
       return;
     }
     try {

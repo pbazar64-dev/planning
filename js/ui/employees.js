@@ -4,6 +4,7 @@
 import { GRID } from '../config.js';
 import { state, setSelectedUserIds, emit } from '../state.js';
 import { saveSelectedUserIds, loadUsers } from '../data.js';
+import { init } from '../b24.js';
 import { bus } from '../bus.js';
 import { showError, showToast } from './toast.js';
 
@@ -119,7 +120,12 @@ export function openSettings() {
       loading.textContent = 'Загрузка сотрудников портала…';
       bodyWrap.appendChild(loading);
       try {
-        state.allUsers = await withTimeout(loadUsers(), 15000);
+        // Сначала дожидаемся готовности BX24 (иначе колбэк user.get может не
+        // сработать), затем тянем список — всё под общим таймаутом.
+        state.allUsers = await withTimeout((async () => {
+          await init();
+          return loadUsers();
+        })(), 20000);
         emit(); // обновить подпись мультиселекта в шапке
       } catch (e) {
         renderError(e);
