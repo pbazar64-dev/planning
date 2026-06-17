@@ -32,6 +32,10 @@ SESSION_HEADER = "X-Vibe-Authorization"
 import os
 DEBUG = os.environ.get("BFF_DEBUG") == "1"
 LOG_PATH = "/opt/app/bff.log"
+# Ключ приложения (vibe_app_*). Держится только на сервере, в браузер не
+# попадает. REST vibecode требует X-Api-Key (приложение) ВМЕСТЕ с
+# Authorization: Bearer vibe_session_* (сессия пользователя от шлюза).
+APP_KEY = os.environ.get("VIBE_APP_KEY", "")
 
 
 def _redact(v):
@@ -112,7 +116,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         data = self.rfile.read(length) if length else None
 
         req = urllib.request.Request(url, data=data, method=method)
-        req.add_header("Authorization", session)
+        req.add_header("Authorization", session)  # Bearer vibe_session_* от шлюза
+        if APP_KEY:
+            req.add_header("X-Api-Key", APP_KEY)   # ключ приложения (серверный секрет)
         req.add_header("Accept", "application/json")
         if data is not None:
             req.add_header("Content-Type", "application/json")
