@@ -25,7 +25,7 @@ function buildHtml(item) {
     : `${formatTime(item.start)}–${formatTime(item.end)}`;
   rows.push(`<div class="tooltip__row"><b>Время:</b> ${timeStr}</div>`);
 
-  if (item.kind === 'task') {
+  if (item.kind === 'task' || item.kind === 'placement') {
     rows.push(`<div class="tooltip__row"><b>Часы:</b> ` +
       `план ${formatHM(item.secPlan)}, факт ${formatHM(item.secFact)}, сегодня ${formatHM(item.secToday)}</div>`);
     if (item.status) {

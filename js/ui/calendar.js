@@ -222,10 +222,12 @@ function buildBlock(g, day) {
   title.textContent = item.title;
   content.appendChild(title);
 
-  if (item.kind === 'task') {
+  if (item.kind === 'task' || item.kind === 'placement') {
     const meta = el('div', 'cal-block__meta');
-    meta.innerHTML =
-      `<span class="cal-block__status" title="${item.status.label}">${item.status.icon}</span>` +
+    const statusHtml = item.status
+      ? `<span class="cal-block__status" title="${item.status.label}">${item.status.icon}</span>`
+      : '';
+    meta.innerHTML = statusHtml +
       `<span class="cal-block__hours">ф:${formatHM(item.secFact)}/п:${formatHM(item.secPlan)}/с:${formatHM(item.secToday)}</span>`;
     content.appendChild(meta);
   } else {

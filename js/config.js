@@ -37,8 +37,8 @@ export const COLORS = {
   task: { bg: '#BBDEFB', border: '#64B5F6' },
   event: { bg: '#C8E6C9', border: '#81C784' },
   absence: { bg: '#E0E0E0', border: '#BDBDBD' },
-  // Планирование задачи (локальная ячейка, саму задачу не меняет).
-  placement: { bg: '#FFE0B2', border: '#FFB74D' },
+  // Размещение задачи отображается так же, как задача (тот же цвет).
+  placement: { bg: '#BBDEFB', border: '#64B5F6' },
 };
 
 // Статусы задач Битрикс24 (tasks.task STATUS) -> человекочитаемое + иконка.

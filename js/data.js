@@ -105,13 +105,72 @@ export async function loadWeekData(userIds, weekDate) {
 
   // Общие размещения задач (планирование) — поверх данных из Битрикс24.
   const placements = await loadPlacements();
+  const placementList = [];
   for (const p of placements) {
     const items = byUser.get(String(p.userId));
-    if (items) items.push(placementToItem(p));
+    if (items) {
+      const it = placementToItem(p);
+      items.push(it);
+      placementList.push(it);
+    }
   }
+  await enrichPlacements(placementList);
 
   await enrichTodayLogged(byUser);
   return byUser;
+}
+
+// Подтягивает к размещениям часы/статус самой задачи (ф/п/с), чтобы они
+// отображались так же, как обычные задачи. Часы у всех размещений одной
+// задачи одинаковые — это показатели самой задачи.
+async function enrichPlacements(items) {
+  const byTask = new Map();
+  for (const it of items) {
+    if (!it.taskId) continue;
+    if (!byTask.has(it.taskId)) byTask.set(it.taskId, []);
+    byTask.get(it.taskId).push(it);
+  }
+  if (byTask.size === 0) return;
+
+  const todayStart = startOfDay(new Date());
+  const todayEnd = addDays(todayStart, 1);
+
+  await Promise.all([...byTask.keys()].map(async (taskId) => {
+    let t = null;
+    let timeRows = [];
+    try {
+      [t, timeRows] = await Promise.all([
+        apiGet('/tasks/' + taskId).catch(() => null),
+        apiGet('/tasks/' + taskId + '/time').catch(() => []),
+      ]);
+    } catch (e) { /* best-effort */ }
+
+    let secPlan = 0, secFact = 0, status = null, title = null;
+    if (t) {
+      const task = Array.isArray(t) ? t[0] : (t.data || t);
+      if (task) {
+        secPlan = Number(task.timeEstimate || task.TIME_ESTIMATE || 0);
+        secFact = Number(task.timeSpentInLogs || task.TIME_SPENT_IN_LOGS || 0);
+        const deadline = parseB24Date(task.deadline || task.DEADLINE);
+        status = resolveTaskStatus(toStatusCode(task.status != null ? task.status : task.STATUS), deadline);
+        title = task.title || task.TITLE || null;
+      }
+    }
+    let secToday = 0;
+    for (const r of asArray(timeRows)) {
+      const created = parseB24Date(r.createdDate || r.CREATED_DATE || r.createdAt);
+      if (created && created >= todayStart && created < todayEnd) {
+        secToday += Number(r.seconds || r.SECONDS || 0);
+      }
+    }
+    for (const it of byTask.get(taskId)) {
+      it.secPlan = secPlan;
+      it.secFact = secFact;
+      it.secToday = secToday;
+      it.status = status;
+      if (title) it.title = title;
+    }
+  }));
 }
 
 async function searchTasks(filter) {
