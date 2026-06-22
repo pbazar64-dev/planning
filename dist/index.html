@@ -208,14 +208,19 @@ body.is-loading .app-header__progress {
 .cal-block__hours { font-variant-numeric: tabular-nums; font-weight: 600; }
 .cal-block__status { font-size: 12px; }
 
-.cal-block__edit {
-  position: absolute; top: 2px; right: 2px;
+.cal-block__edit, .cal-block__del {
+  position: absolute; top: 2px;
   width: 20px; height: 20px; border: none; border-radius: 5px;
   background: rgba(255,255,255,.85); cursor: pointer; font-size: 12px;
   display: none; align-items: center; justify-content: center;
+  z-index: 5;
 }
-.cal-block:hover .cal-block__edit { display: inline-flex; }
+.cal-block__edit { right: 24px; }
+.cal-block__del { right: 2px; }
+.cal-block:hover .cal-block__edit,
+.cal-block:hover .cal-block__del { display: inline-flex; }
 .cal-block__edit:hover { background: #fff; }
+.cal-block__del:hover { background: #fff; }
 
 .cal-block__edge {
   position: absolute; left: 0; right: 0;
@@ -1177,6 +1182,15 @@ async function updateEvent(rawId, userId, { name, description, start, end, kind 
   return apiSend('/calendar-events/' + rawId, 'PATCH', body);
 }
 
+async function deleteEvent(rawId, userId) {
+  const q = userId ? ('?type=user&ownerId=' + encodeURIComponent(userId)) : '';
+  return apiSend('/calendar-events/' + rawId + q, 'DELETE');
+}
+
+async function deleteTask(rawId) {
+  return apiSend('/tasks/' + rawId, 'DELETE');
+}
+
 
 
 // ===== js/ui/toast.js =====
@@ -1885,6 +1899,13 @@ function buildBlock(g, day) {
   pencil.addEventListener('click', (e) => { e.stopPropagation(); openEditModal(item); });
   block.appendChild(pencil);
 
+  // Корзина — удалить ячейку.
+  const trash = el('button', 'cal-block__del');
+  trash.textContent = '🗑';
+  trash.title = 'Удалить';
+  trash.addEventListener('click', (e) => { e.stopPropagation(); deleteBlock(item); });
+  block.appendChild(trash);
+
   // Ручки изменения длительности по краям — для планируемых задач и событий.
   // Тянем границу мышью, попап редактирования при этом не открывается.
   const resizable = !item.allDay && !g.outOfGrid &&
@@ -1901,6 +1922,24 @@ function buildBlock(g, day) {
   block.addEventListener('mouseleave', hideTooltip);
 
   return block;
+}
+
+async function deleteBlock(item) {
+  hideTooltip();
+  try {
+    if (item.kind === 'placement') {
+      await removePlacement(item.localId);
+    } else if (item.kind === 'event' || item.kind === 'absence') {
+      if (!window.confirm('Удалить это событие из Битрикс24?')) return;
+      await deleteEvent(item.rawId, item.userId);
+    } else if (item.kind === 'task') {
+      if (!window.confirm(`Удалить задачу «${item.title}» в Битрикс24? Действие необратимо.`)) return;
+      await deleteTask(item.rawId);
+    }
+    await bus.reloadWeek();
+  } catch (e) {
+    showError(e);
+  }
 }
 
 // --- Изменение длительности перетаскиванием края ---------------------------

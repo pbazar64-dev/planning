@@ -419,4 +419,13 @@ export async function updateEvent(rawId, userId, { name, description, start, end
   return apiSend('/calendar-events/' + rawId, 'PATCH', body);
 }
 
+export async function deleteEvent(rawId, userId) {
+  const q = userId ? ('?type=user&ownerId=' + encodeURIComponent(userId)) : '';
+  return apiSend('/calendar-events/' + rawId + q, 'DELETE');
+}
+
+export async function deleteTask(rawId) {
+  return apiSend('/tasks/' + rawId, 'DELETE');
+}
+
 export { isToday };

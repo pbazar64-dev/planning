@@ -11,7 +11,7 @@ import {
 } from '../dates.js';
 import { showTooltip, moveTooltip, hideTooltip } from './tooltip.js';
 import { openSlotMenu, openEditModal } from './modals.js';
-import { updatePlacement, updateEvent } from '../data.js';
+import { updatePlacement, updateEvent, removePlacement, deleteEvent, deleteTask } from '../data.js';
 import { bus } from '../bus.js';
 import { showError } from './toast.js';
 
@@ -242,6 +242,13 @@ function buildBlock(g, day) {
   pencil.addEventListener('click', (e) => { e.stopPropagation(); openEditModal(item); });
   block.appendChild(pencil);
 
+  // Корзина — удалить ячейку.
+  const trash = el('button', 'cal-block__del');
+  trash.textContent = '🗑';
+  trash.title = 'Удалить';
+  trash.addEventListener('click', (e) => { e.stopPropagation(); deleteBlock(item); });
+  block.appendChild(trash);
+
   // Ручки изменения длительности по краям — для планируемых задач и событий.
   // Тянем границу мышью, попап редактирования при этом не открывается.
   const resizable = !item.allDay && !g.outOfGrid &&
@@ -258,6 +265,24 @@ function buildBlock(g, day) {
   block.addEventListener('mouseleave', hideTooltip);
 
   return block;
+}
+
+async function deleteBlock(item) {
+  hideTooltip();
+  try {
+    if (item.kind === 'placement') {
+      await removePlacement(item.localId);
+    } else if (item.kind === 'event' || item.kind === 'absence') {
+      if (!window.confirm('Удалить это событие из Битрикс24?')) return;
+      await deleteEvent(item.rawId, item.userId);
+    } else if (item.kind === 'task') {
+      if (!window.confirm(`Удалить задачу «${item.title}» в Битрикс24? Действие необратимо.`)) return;
+      await deleteTask(item.rawId);
+    }
+    await bus.reloadWeek();
+  } catch (e) {
+    showError(e);
+  }
 }
 
 // --- Изменение длительности перетаскиванием края ---------------------------
