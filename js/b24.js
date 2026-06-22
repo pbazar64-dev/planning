@@ -109,6 +109,28 @@ export async function apiSend(path, method, body) {
   return json.data !== undefined ? json.data : json;
 }
 
+// Запрос к собственным эндпоинтам BFF (вне /v1, например /placements).
+export async function bffRequest(path, { method = 'GET', body } = {}) {
+  let resp;
+  try {
+    resp = await fetch('/api' + path, {
+      method,
+      headers: body !== undefined ? { 'Content-Type': 'application/json' } : undefined,
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+      credentials: 'same-origin',
+    });
+  } catch (e) {
+    throw new B24Error('Сетевая ошибка: ' + e.message, 'NETWORK', e);
+  }
+  let json;
+  try { json = await resp.json(); } catch { json = null; }
+  if (!resp.ok || (json && json.success === false)) {
+    const err = (json && json.error) || {};
+    throw new B24Error(err.message || ('HTTP ' + resp.status), err.code || resp.status, json);
+  }
+  return json || {};
+}
+
 // --- Настройки (выбор сотрудников) ----------------------------------------
 // Хранятся локально в браузере: токена для серверного хранилища у фронта нет,
 // а выбор по умолчанию — это пользовательское предпочтение на рабочем месте.

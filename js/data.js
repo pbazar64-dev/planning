@@ -7,7 +7,7 @@
 //     status, hoursFact, hoursPlan, hoursToday, allDay, raw }
 
 import {
-  apiGet, apiSend, getOption, setOption, OPTION_KEYS,
+  apiGet, apiSend, bffRequest, getOption, setOption, OPTION_KEYS,
 } from './b24.js';
 import { GRID, TASK_STATUS } from './config.js';
 import {
@@ -70,12 +70,6 @@ export async function saveSelectedUserIds(ids) {
 
 // --- Загрузка данных недели ------------------------------------------------
 
-const TASK_SELECT = [
-  'id', 'title', 'status', 'responsibleId', 'description',
-  'deadline', 'startDatePlan', 'endDatePlan',
-  'timeEstimate', 'timeSpentInLogs',
-];
-
 // Загружает задачи, события и отсутствия для всех сотрудников за неделю.
 // Возвращает Map<userId, item[]>.
 export async function loadWeekData(userIds, weekDate) {
@@ -109,10 +103,11 @@ export async function loadWeekData(userIds, weekDate) {
     }
   }));
 
-  // Локальные размещения задач (планирование) — поверх данных из Битрикс24.
-  for (const id of userIds) {
-    const items = byUser.get(String(id));
-    for (const p of placementItems(id)) items.push(p);
+  // Общие размещения задач (планирование) — поверх данных из Битрикс24.
+  const placements = await loadPlacements();
+  for (const p of placements) {
+    const items = byUser.get(String(p.userId));
+    if (items) items.push(placementToItem(p));
   }
 
   await enrichTodayLogged(byUser);
@@ -294,69 +289,90 @@ export async function updateTask(rawId, { title, description, start, end, hoursP
   return apiSend('/tasks/' + rawId, 'PATCH', body);
 }
 
-// --- Локальные «размещения» задач на сетке (планирование) -----------------
+// --- «Размещения» задач на сетке (планирование) ---------------------------
 // Размещение задачи в ячейке НЕ меняет саму задачу в Битрикс24: ни плановые
 // даты, ни дедлайн, ни учёт времени. Одну задачу можно положить в несколько
-// слотов параллельно. Хранится локально в браузере.
+// слотов параллельно. Хранится ОБЩИМ образом на сервере приложения (BFF,
+// /api/placements), поэтому видно всем пользователям портала, а не только
+// автору.
 
-const PLACEMENTS_KEY = 'planner_task_placements';
-
-function readPlacements() {
+export async function loadPlacements() {
   try {
-    const arr = JSON.parse(localStorage.getItem(PLACEMENTS_KEY) || '[]');
-    return Array.isArray(arr) ? arr : [];
-  } catch { return []; }
+    const json = await bffRequest('/placements');
+    return Array.isArray(json.data) ? json.data : [];
+  } catch (e) {
+    console.warn('Не удалось загрузить размещения:', e);
+    return [];
+  }
 }
 
-function writePlacements(arr) {
-  try { localStorage.setItem(PLACEMENTS_KEY, JSON.stringify(arr)); } catch (e) { /* приватный режим */ }
-}
-
-export function addPlacement({ taskId, title, userId, start, end }) {
-  const arr = readPlacements();
-  arr.push({
-    id: 'pl_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7),
-    taskId: String(taskId),
-    title: title || 'Задача',
-    userId: String(userId),
-    start: start.toISOString(),
-    end: end.toISOString(),
+export async function addPlacement({ taskId, title, userId, start, end }) {
+  await bffRequest('/placements', {
+    method: 'POST',
+    body: {
+      taskId: String(taskId),
+      title: title || 'Задача',
+      userId: String(userId),
+      start: start.toISOString(),
+      end: end.toISOString(),
+    },
   });
-  writePlacements(arr);
 }
 
-export function updatePlacement(id, { start, end }) {
-  const arr = readPlacements();
-  const p = arr.find((x) => x.id === id);
-  if (!p) return;
-  if (start) p.start = start.toISOString();
-  if (end) p.end = end.toISOString();
-  writePlacements(arr);
+export async function updatePlacement(id, { start, end }) {
+  const body = {};
+  if (start) body.start = start.toISOString();
+  if (end) body.end = end.toISOString();
+  await bffRequest('/placements/' + encodeURIComponent(id), { method: 'PATCH', body });
 }
 
-export function removePlacement(id) {
-  writePlacements(readPlacements().filter((x) => x.id !== id));
+export async function removePlacement(id) {
+  await bffRequest('/placements/' + encodeURIComponent(id), { method: 'DELETE' });
 }
 
-// Размещения сотрудника в виде item-ов для рендера календаря.
-function placementItems(userId) {
-  return readPlacements()
-    .filter((p) => String(p.userId) === String(userId))
-    .map((p) => ({
-      id: 'place_' + p.id,
-      localId: p.id,
-      kind: 'placement',
-      userId: String(p.userId),
-      taskId: p.taskId,
-      title: p.title,
-      description: '',
-      start: new Date(p.start),
-      end: new Date(p.end),
-      allDay: false,
-      status: null,
-      hoursPlan: 0, hoursFact: 0, hoursToday: 0,
-      raw: p,
-    }));
+// Разовая миграция: если у пользователя остались размещения в localStorage
+// (старая версия), переносим их в общее серверное хранилище и чистим локальные.
+export async function migrateLocalPlacements() {
+  let arr;
+  try {
+    arr = JSON.parse(localStorage.getItem('planner_task_placements') || '[]');
+  } catch { return; }
+  if (!Array.isArray(arr) || arr.length === 0) return;
+  for (const p of arr) {
+    try {
+      await bffRequest('/placements', {
+        method: 'POST',
+        body: {
+          taskId: String(p.taskId || ''),
+          title: p.title || 'Задача',
+          userId: String(p.userId || ''),
+          start: p.start,
+          end: p.end,
+        },
+      });
+    } catch (e) { /* пропускаем сбойные */ }
+  }
+  try { localStorage.removeItem('planner_task_placements'); } catch (e) { /* ignore */ }
+}
+
+// Размещение -> item для рендера календаря.
+function placementToItem(p) {
+  return {
+    id: 'place_' + p.id,
+    localId: p.id,
+    kind: 'placement',
+    userId: String(p.userId),
+    taskId: p.taskId,
+    title: p.title,
+    description: '',
+    start: new Date(p.start),
+    end: new Date(p.end),
+    allDay: false,
+    status: null,
+    hoursPlan: 0, hoursFact: 0, hoursToday: 0,
+    secPlan: 0, secFact: 0, secToday: 0,
+    raw: p,
+  };
 }
 
 // Список задач сотрудника для привязки (активные, не завершённые).

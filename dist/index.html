@@ -722,6 +722,28 @@ async function apiSend(path, method, body) {
   return json.data !== undefined ? json.data : json;
 }
 
+// Запрос к собственным эндпоинтам BFF (вне /v1, например /placements).
+async function bffRequest(path, { method = 'GET', body } = {}) {
+  let resp;
+  try {
+    resp = await fetch('/api' + path, {
+      method,
+      headers: body !== undefined ? { 'Content-Type': 'application/json' } : undefined,
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+      credentials: 'same-origin',
+    });
+  } catch (e) {
+    throw new B24Error('Сетевая ошибка: ' + e.message, 'NETWORK', e);
+  }
+  let json;
+  try { json = await resp.json(); } catch { json = null; }
+  if (!resp.ok || (json && json.success === false)) {
+    const err = (json && json.error) || {};
+    throw new B24Error(err.message || ('HTTP ' + resp.status), err.code || resp.status, json);
+  }
+  return json || {};
+}
+
 // --- Настройки (выбор сотрудников) ----------------------------------------
 // Хранятся локально в браузере: токена для серверного хранилища у фронта нет,
 // а выбор по умолчанию — это пользовательское предпочтение на рабочем месте.
@@ -806,12 +828,6 @@ async function saveSelectedUserIds(ids) {
 
 // --- Загрузка данных недели ------------------------------------------------
 
-const TASK_SELECT = [
-  'id', 'title', 'status', 'responsibleId', 'description',
-  'deadline', 'startDatePlan', 'endDatePlan',
-  'timeEstimate', 'timeSpentInLogs',
-];
-
 // Загружает задачи, события и отсутствия для всех сотрудников за неделю.
 // Возвращает Map<userId, item[]>.
 async function loadWeekData(userIds, weekDate) {
@@ -845,10 +861,11 @@ async function loadWeekData(userIds, weekDate) {
     }
   }));
 
-  // Локальные размещения задач (планирование) — поверх данных из Битрикс24.
-  for (const id of userIds) {
-    const items = byUser.get(String(id));
-    for (const p of placementItems(id)) items.push(p);
+  // Общие размещения задач (планирование) — поверх данных из Битрикс24.
+  const placements = await loadPlacements();
+  for (const p of placements) {
+    const items = byUser.get(String(p.userId));
+    if (items) items.push(placementToItem(p));
   }
 
   await enrichTodayLogged(byUser);
@@ -1030,69 +1047,90 @@ async function updateTask(rawId, { title, description, start, end, hoursPlan, st
   return apiSend('/tasks/' + rawId, 'PATCH', body);
 }
 
-// --- Локальные «размещения» задач на сетке (планирование) -----------------
+// --- «Размещения» задач на сетке (планирование) ---------------------------
 // Размещение задачи в ячейке НЕ меняет саму задачу в Битрикс24: ни плановые
 // даты, ни дедлайн, ни учёт времени. Одну задачу можно положить в несколько
-// слотов параллельно. Хранится локально в браузере.
+// слотов параллельно. Хранится ОБЩИМ образом на сервере приложения (BFF,
+// /api/placements), поэтому видно всем пользователям портала, а не только
+// автору.
 
-const PLACEMENTS_KEY = 'planner_task_placements';
-
-function readPlacements() {
+async function loadPlacements() {
   try {
-    const arr = JSON.parse(localStorage.getItem(PLACEMENTS_KEY) || '[]');
-    return Array.isArray(arr) ? arr : [];
-  } catch { return []; }
+    const json = await bffRequest('/placements');
+    return Array.isArray(json.data) ? json.data : [];
+  } catch (e) {
+    console.warn('Не удалось загрузить размещения:', e);
+    return [];
+  }
 }
 
-function writePlacements(arr) {
-  try { localStorage.setItem(PLACEMENTS_KEY, JSON.stringify(arr)); } catch (e) { /* приватный режим */ }
-}
-
-function addPlacement({ taskId, title, userId, start, end }) {
-  const arr = readPlacements();
-  arr.push({
-    id: 'pl_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7),
-    taskId: String(taskId),
-    title: title || 'Задача',
-    userId: String(userId),
-    start: start.toISOString(),
-    end: end.toISOString(),
+async function addPlacement({ taskId, title, userId, start, end }) {
+  await bffRequest('/placements', {
+    method: 'POST',
+    body: {
+      taskId: String(taskId),
+      title: title || 'Задача',
+      userId: String(userId),
+      start: start.toISOString(),
+      end: end.toISOString(),
+    },
   });
-  writePlacements(arr);
 }
 
-function updatePlacement(id, { start, end }) {
-  const arr = readPlacements();
-  const p = arr.find((x) => x.id === id);
-  if (!p) return;
-  if (start) p.start = start.toISOString();
-  if (end) p.end = end.toISOString();
-  writePlacements(arr);
+async function updatePlacement(id, { start, end }) {
+  const body = {};
+  if (start) body.start = start.toISOString();
+  if (end) body.end = end.toISOString();
+  await bffRequest('/placements/' + encodeURIComponent(id), { method: 'PATCH', body });
 }
 
-function removePlacement(id) {
-  writePlacements(readPlacements().filter((x) => x.id !== id));
+async function removePlacement(id) {
+  await bffRequest('/placements/' + encodeURIComponent(id), { method: 'DELETE' });
 }
 
-// Размещения сотрудника в виде item-ов для рендера календаря.
-function placementItems(userId) {
-  return readPlacements()
-    .filter((p) => String(p.userId) === String(userId))
-    .map((p) => ({
-      id: 'place_' + p.id,
-      localId: p.id,
-      kind: 'placement',
-      userId: String(p.userId),
-      taskId: p.taskId,
-      title: p.title,
-      description: '',
-      start: new Date(p.start),
-      end: new Date(p.end),
-      allDay: false,
-      status: null,
-      hoursPlan: 0, hoursFact: 0, hoursToday: 0,
-      raw: p,
-    }));
+// Разовая миграция: если у пользователя остались размещения в localStorage
+// (старая версия), переносим их в общее серверное хранилище и чистим локальные.
+async function migrateLocalPlacements() {
+  let arr;
+  try {
+    arr = JSON.parse(localStorage.getItem('planner_task_placements') || '[]');
+  } catch { return; }
+  if (!Array.isArray(arr) || arr.length === 0) return;
+  for (const p of arr) {
+    try {
+      await bffRequest('/placements', {
+        method: 'POST',
+        body: {
+          taskId: String(p.taskId || ''),
+          title: p.title || 'Задача',
+          userId: String(p.userId || ''),
+          start: p.start,
+          end: p.end,
+        },
+      });
+    } catch (e) { /* пропускаем сбойные */ }
+  }
+  try { localStorage.removeItem('planner_task_placements'); } catch (e) { /* ignore */ }
+}
+
+// Размещение -> item для рендера календаря.
+function placementToItem(p) {
+  return {
+    id: 'place_' + p.id,
+    localId: p.id,
+    kind: 'placement',
+    userId: String(p.userId),
+    taskId: p.taskId,
+    title: p.title,
+    description: '',
+    start: new Date(p.start),
+    end: new Date(p.end),
+    allDay: false,
+    status: null,
+    hoursPlan: 0, hoursFact: 0, hoursToday: 0,
+    secPlan: 0, secFact: 0, secToday: 0,
+    raw: p,
+  };
 }
 
 // Список задач сотрудника для привязки (активные, не завершённые).
@@ -1354,7 +1392,7 @@ async function openPickTask({ user, start, end }) {
       item.textContent = t.title;
       item.addEventListener('click', async () => {
         try {
-          addPlacement({ taskId: t.id, title: t.title, userId: user.id, start, end });
+          await addPlacement({ taskId: t.id, title: t.title, userId: user.id, start, end });
           showToast('Задача добавлена в планирование', 'success');
           modal.destroy();
           await bus.reloadWeek();
@@ -1492,10 +1530,12 @@ function openPlacementForm(item) {
   del.className = 'btn btn--ghost';
   del.textContent = 'Убрать из планирования';
   del.addEventListener('click', async () => {
-    removePlacement(item.localId);
-    modal.destroy();
-    showToast('Убрано из планирования', 'success');
-    await bus.reloadWeek();
+    try {
+      await removePlacement(item.localId);
+      modal.destroy();
+      showToast('Убрано из планирования', 'success');
+      await bus.reloadWeek();
+    } catch (e) { showError(e); }
   });
   const save = document.createElement('button');
   save.className = 'btn btn--primary';
@@ -1504,10 +1544,12 @@ function openPlacementForm(item) {
     const s = new Date(fStart.input.value);
     const e = new Date(fEnd.input.value);
     if (!(e > s)) { showError(new Error('Окончание должно быть позже начала')); return; }
-    updatePlacement(item.localId, { start: s, end: e });
-    modal.destroy();
-    showToast('Планирование обновлено', 'success');
-    await bus.reloadWeek();
+    try {
+      await updatePlacement(item.localId, { start: s, end: e });
+      modal.destroy();
+      showToast('Планирование обновлено', 'success');
+      await bus.reloadWeek();
+    } catch (err) { showError(err); }
   });
   footer.appendChild(del);
   footer.appendChild(save);
@@ -1915,7 +1957,7 @@ function startResize(edge, g, day, item, block, startY) {
     if (!(end > start)) { bus.reloadWeek(); return; }
     try {
       if (item.kind === 'placement') {
-        updatePlacement(item.localId, { start, end });
+        await updatePlacement(item.localId, { start, end });
       } else {
         await updateEvent(item.rawId, item.userId, { start, end, kind: item.kind });
       }
@@ -2275,6 +2317,8 @@ async function loadInitialData() {
   } finally {
     state.loading = false; emit();
   }
+  // Перенос старых локальных размещений в общее хранилище (разово).
+  await migrateLocalPlacements();
   await reloadWeek();
 }
 

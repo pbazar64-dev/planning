@@ -111,7 +111,7 @@ export async function openPickTask({ user, start, end }) {
       item.textContent = t.title;
       item.addEventListener('click', async () => {
         try {
-          addPlacement({ taskId: t.id, title: t.title, userId: user.id, start, end });
+          await addPlacement({ taskId: t.id, title: t.title, userId: user.id, start, end });
           showToast('Задача добавлена в планирование', 'success');
           modal.destroy();
           await bus.reloadWeek();
@@ -249,10 +249,12 @@ export function openPlacementForm(item) {
   del.className = 'btn btn--ghost';
   del.textContent = 'Убрать из планирования';
   del.addEventListener('click', async () => {
-    removePlacement(item.localId);
-    modal.destroy();
-    showToast('Убрано из планирования', 'success');
-    await bus.reloadWeek();
+    try {
+      await removePlacement(item.localId);
+      modal.destroy();
+      showToast('Убрано из планирования', 'success');
+      await bus.reloadWeek();
+    } catch (e) { showError(e); }
   });
   const save = document.createElement('button');
   save.className = 'btn btn--primary';
@@ -261,10 +263,12 @@ export function openPlacementForm(item) {
     const s = new Date(fStart.input.value);
     const e = new Date(fEnd.input.value);
     if (!(e > s)) { showError(new Error('Окончание должно быть позже начала')); return; }
-    updatePlacement(item.localId, { start: s, end: e });
-    modal.destroy();
-    showToast('Планирование обновлено', 'success');
-    await bus.reloadWeek();
+    try {
+      await updatePlacement(item.localId, { start: s, end: e });
+      modal.destroy();
+      showToast('Планирование обновлено', 'success');
+      await bus.reloadWeek();
+    } catch (err) { showError(err); }
   });
   footer.appendChild(del);
   footer.appendChild(save);

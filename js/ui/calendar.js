@@ -314,7 +314,7 @@ function startResize(edge, g, day, item, block, startY) {
     if (!(end > start)) { bus.reloadWeek(); return; }
     try {
       if (item.kind === 'placement') {
-        updatePlacement(item.localId, { start, end });
+        await updatePlacement(item.localId, { start, end });
       } else {
         await updateEvent(item.rawId, item.userId, { start, end, kind: item.kind });
       }
