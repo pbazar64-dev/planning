@@ -121,9 +121,8 @@ export async function loadWeekData(userIds, weekDate) {
 
 async function searchTasks(filter) {
   try {
-    const data = await apiSend('/tasks/search', 'POST', {
-      filter, select: TASK_SELECT, limit: 200,
-    });
+    // Без select — берём полные записи (иначе теряются поля времени/статуса).
+    const data = await apiSend('/tasks/search', 'POST', { filter, limit: 200 });
     return asArray(data);
   } catch (e) {
     console.warn('Не удалось загрузить задачи:', e);

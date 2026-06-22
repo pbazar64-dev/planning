@@ -137,7 +137,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             _dlog("%s %s %s\n  used_session=%s\n  req_headers=%s\n  -> upstream %s status=%s body=%s" % (
                 time.strftime("%H:%M:%S"), method, self.path, _redact(session),
                 json.dumps(hdr_dump, ensure_ascii=False),
-                url, status, payload[:300].decode("utf-8", "replace")))
+                url, status, payload[:2000].decode("utf-8", "replace")))
 
         self.send_response(status)
         self.send_header("Content-Type", ctype)
