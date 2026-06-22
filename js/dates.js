@@ -114,6 +114,14 @@ export function secondsToHours(seconds) {
   return Math.round(h * 10) / 10;
 }
 
+// Секунды -> «Ч:ММ» (например, 4800 -> «1:20»).
+export function formatHM(seconds) {
+  const totalMin = Math.round((Number(seconds) || 0) / 60);
+  const h = Math.floor(totalMin / 60);
+  const m = totalMin % 60;
+  return `${h}:${String(m).padStart(2, '0')}`;
+}
+
 // Дата начала и конца недели в формате Битрикс24 — для фильтров запросов.
 export function weekRangeB24(date) {
   const monday = startOfWeek(date);

@@ -1,6 +1,6 @@
 // Единый тултип с полной информацией о ячейке, следующий за курсором.
 
-import { formatTime } from '../dates.js';
+import { formatTime, formatHM } from '../dates.js';
 
 let tip;
 
@@ -27,7 +27,7 @@ function buildHtml(item) {
 
   if (item.kind === 'task') {
     rows.push(`<div class="tooltip__row"><b>Часы:</b> ` +
-      `план ${item.hoursPlan}, факт ${item.hoursFact}, сегодня ${item.hoursToday}</div>`);
+      `план ${formatHM(item.secPlan)}, факт ${formatHM(item.secFact)}, сегодня ${formatHM(item.secToday)}</div>`);
     if (item.status) {
       rows.push(`<div class="tooltip__row"><b>Статус:</b> ${item.status.icon} ${item.status.label}</div>`);
     }

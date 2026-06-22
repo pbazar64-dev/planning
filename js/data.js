@@ -177,6 +177,10 @@ function mapTask(t, userId) {
     hoursPlan: secondsToHours(timeEstimate),
     hoursFact: secondsToHours(timeSpent),
     hoursToday: 0,
+    // Точные значения в секундах — для отображения в формате Ч:ММ.
+    secPlan: timeEstimate,
+    secFact: timeSpent,
+    secToday: 0,
     raw: t,
   };
 }
@@ -257,6 +261,7 @@ async function enrichTodayLogged(byUser) {
           sec += Number(r.seconds || r.SECONDS || 0);
         }
       }
+      it.secToday = sec;
       it.hoursToday = secondsToHours(sec);
     } catch (e) { /* не критично — оставим 0 */ }
   }));

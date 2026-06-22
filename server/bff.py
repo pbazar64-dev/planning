@@ -10,8 +10,9 @@
 Что делает сервер:
   * отдаёт статику из PUBLIC_DIR (SPA: index.html);
   * /api/v1/<...>  -> проксирует на https://vibecode.bitrix24.tech/v1/<...>,
-    подставляя СЕРВЕРНЫЙ заголовок сессии (клиентский Authorization не
-    используется — это защита от утечки токена через XSS);
+    добавляя X-Api-Key (ключ приложения, серверный секрет из env VIBE_APP_KEY)
+    и Authorization из сессии шлюза. Клиентский Authorization не используется —
+    защита от утечки токена через XSS;
   * /api/whoami    -> диагностика: видна ли сессия от шлюза.
 
 Только stdlib — на сервере есть лишь python3.
@@ -19,7 +20,7 @@
 
 import http.server
 import json
-import time
+import os
 import urllib.error
 import urllib.request
 
@@ -28,30 +29,10 @@ UPSTREAM = "https://vibecode.bitrix24.tech"
 PORT = 3000
 # Заголовок, который шлюз vibecode подставляет на пути «шлюз -> сервер».
 SESSION_HEADER = "X-Vibe-Authorization"
-# Временный диагностический лог (включается переменной BFF_DEBUG=1).
-import os
-DEBUG = os.environ.get("BFF_DEBUG") == "1"
-LOG_PATH = "/opt/app/bff.log"
-# Ключ приложения (vibe_app_*). Держится только на сервере, в браузер не
-# попадает. REST vibecode требует X-Api-Key (приложение) ВМЕСТЕ с
-# Authorization: Bearer vibe_session_* (сессия пользователя от шлюза).
+# Ключ приложения (vibe_app_*). Только на сервере, в браузер не попадает.
+# REST vibecode требует X-Api-Key (приложение) ВМЕСТЕ с Authorization
+# (сессия пользователя).
 APP_KEY = os.environ.get("VIBE_APP_KEY", "")
-
-
-def _redact(v):
-    if not v:
-        return None
-    return v[:18] + "…(len=%d)" % len(v)
-
-
-def _dlog(line):
-    if not DEBUG:
-        return
-    try:
-        with open(LOG_PATH, "a") as f:
-            f.write(line + "\n")
-    except Exception:
-        pass
 
 
 class Handler(http.server.SimpleHTTPRequestHandler):
@@ -116,9 +97,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         data = self.rfile.read(length) if length else None
 
         req = urllib.request.Request(url, data=data, method=method)
-        req.add_header("Authorization", session)  # Bearer vibe_session_* от шлюза
+        req.add_header("Authorization", session)   # Bearer vibe_session_* от шлюза
         if APP_KEY:
-            req.add_header("X-Api-Key", APP_KEY)   # ключ приложения (серверный секрет)
+            req.add_header("X-Api-Key", APP_KEY)    # ключ приложения (серверный секрет)
         req.add_header("Accept", "application/json")
         if data is not None:
             req.add_header("Content-Type", "application/json")
@@ -129,15 +110,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         except urllib.error.HTTPError as e:
             payload, status, ctype = e.read(), e.code, e.headers.get("Content-Type", "application/json")
         except Exception as e:  # сеть/таймаут
-            _dlog("%s %s -> EXC %s" % (time.strftime("%H:%M:%S"), self.path, e))
             return self._send_json(502, {"error": "UPSTREAM_ERROR", "message": str(e)})
-
-        if DEBUG:
-            hdr_dump = {k: (_redact(self.headers.get(k)) if any(s in k.lower() for s in ("auth", "vibe", "token", "session", "cookie")) else self.headers.get(k)) for k in self.headers.keys()}
-            _dlog("%s %s %s\n  used_session=%s\n  req_headers=%s\n  -> upstream %s status=%s body=%s" % (
-                time.strftime("%H:%M:%S"), method, self.path, _redact(session),
-                json.dumps(hdr_dump, ensure_ascii=False),
-                url, status, payload[:2000].decode("utf-8", "replace")))
 
         self.send_response(status)
         self.send_header("Content-Type", ctype)

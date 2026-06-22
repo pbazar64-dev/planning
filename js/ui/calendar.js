@@ -6,7 +6,7 @@ import {
   state, selectedUsers, itemsFor,
 } from '../state.js';
 import {
-  weekDays, formatDayLabel, isToday, formatTime,
+  weekDays, formatDayLabel, isToday, formatTime, formatHM,
   startOfDay, addDays, minutesFromGridStart,
 } from '../dates.js';
 import { showTooltip, moveTooltip, hideTooltip } from './tooltip.js';
@@ -226,7 +226,7 @@ function buildBlock(g, day) {
     const meta = el('div', 'cal-block__meta');
     meta.innerHTML =
       `<span class="cal-block__status" title="${item.status.label}">${item.status.icon}</span>` +
-      `<span class="cal-block__hours">ф:${item.hoursFact}/п:${item.hoursPlan}/с:${item.hoursToday}</span>`;
+      `<span class="cal-block__hours">ф:${formatHM(item.secFact)}/п:${formatHM(item.secPlan)}/с:${formatHM(item.secToday)}</span>`;
     content.appendChild(meta);
   } else {
     const meta = el('div', 'cal-block__meta');

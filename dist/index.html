@@ -539,6 +539,14 @@ function secondsToHours(seconds) {
   return Math.round(h * 10) / 10;
 }
 
+// Секунды -> «Ч:ММ» (например, 4800 -> «1:20»).
+function formatHM(seconds) {
+  const totalMin = Math.round((Number(seconds) || 0) / 60);
+  const h = Math.floor(totalMin / 60);
+  const m = totalMin % 60;
+  return `${h}:${String(m).padStart(2, '0')}`;
+}
+
 // Дата начала и конца недели в формате Битрикс24 — для фильтров запросов.
 function weekRangeB24(date) {
   const monday = startOfWeek(date);
@@ -905,6 +913,10 @@ function mapTask(t, userId) {
     hoursPlan: secondsToHours(timeEstimate),
     hoursFact: secondsToHours(timeSpent),
     hoursToday: 0,
+    // Точные значения в секундах — для отображения в формате Ч:ММ.
+    secPlan: timeEstimate,
+    secFact: timeSpent,
+    secToday: 0,
     raw: t,
   };
 }
@@ -985,6 +997,7 @@ async function enrichTodayLogged(byUser) {
           sec += Number(r.seconds || r.SECONDS || 0);
         }
       }
+      it.secToday = sec;
       it.hoursToday = secondsToHours(sec);
     } catch (e) { /* не критично — оставим 0 */ }
   }));
@@ -1192,7 +1205,7 @@ function buildHtml(item) {
 
   if (item.kind === 'task') {
     rows.push(`<div class="tooltip__row"><b>Часы:</b> ` +
-      `план ${item.hoursPlan}, факт ${item.hoursFact}, сегодня ${item.hoursToday}</div>`);
+      `план ${formatHM(item.secPlan)}, факт ${formatHM(item.secFact)}, сегодня ${formatHM(item.secToday)}</div>`);
     if (item.status) {
       rows.push(`<div class="tooltip__row"><b>Статус:</b> ${item.status.icon} ${item.status.label}</div>`);
     }
@@ -1814,7 +1827,7 @@ function buildBlock(g, day) {
     const meta = el('div', 'cal-block__meta');
     meta.innerHTML =
       `<span class="cal-block__status" title="${item.status.label}">${item.status.icon}</span>` +
-      `<span class="cal-block__hours">ф:${item.hoursFact}/п:${item.hoursPlan}/с:${item.hoursToday}</span>`;
+      `<span class="cal-block__hours">ф:${formatHM(item.secFact)}/п:${formatHM(item.secPlan)}/с:${formatHM(item.secToday)}</span>`;
     content.appendChild(meta);
   } else {
     const meta = el('div', 'cal-block__meta');
