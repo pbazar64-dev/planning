@@ -225,6 +225,19 @@ body.is-loading .app-header__progress {
 .cal-block__edge--top { top: 0; }
 .cal-block__edge--bottom { bottom: 0; }
 
+/* Планируемая задача — пунктирная рамка, чтобы отличать от реальных сущностей. */
+.cal-block--placement { border-style: dashed; }
+
+/* Ручки изменения длительности по краям ячейки. */
+.cal-block__resize {
+  position: absolute; left: 0; right: 0; height: 7px;
+  cursor: ns-resize; z-index: 4;
+}
+.cal-block__resize--top { top: 0; }
+.cal-block__resize--bottom { bottom: 0; }
+.cal-block:hover .cal-block__resize { background: rgba(0,0,0,.08); }
+body.is-resizing { cursor: ns-resize; user-select: none; }
+
 /* --- Тултип -------------------------------------------------------------- */
 
 .tooltip {
@@ -394,6 +407,8 @@ const COLORS = {
   task: { bg: '#BBDEFB', border: '#64B5F6' },
   event: { bg: '#C8E6C9', border: '#81C784' },
   absence: { bg: '#E0E0E0', border: '#BDBDBD' },
+  // Планирование задачи (локальная ячейка, саму задачу не меняет).
+  placement: { bg: '#FFE0B2', border: '#FFB74D' },
 };
 
 // Статусы задач Битрикс24 (tasks.task STATUS) -> человекочитаемое + иконка.
@@ -822,6 +837,12 @@ async function loadWeekData(userIds, weekDate) {
     }
   }));
 
+  // Локальные размещения задач (планирование) — поверх данных из Битрикс24.
+  for (const id of userIds) {
+    const items = byUser.get(String(id));
+    for (const p of placementItems(id)) items.push(p);
+  }
+
   await enrichTodayLogged(byUser);
   return byUser;
 }
@@ -997,12 +1018,69 @@ async function updateTask(rawId, { title, description, start, end, hoursPlan, st
   return apiSend('/tasks/' + rawId, 'PATCH', body);
 }
 
-// Привязать существующую задачу к слоту = задать плановые даты.
-async function attachTaskToSlot(rawId, start, end) {
-  return apiSend('/tasks/' + rawId, 'PATCH', {
-    startDatePlan: toB24DateTime(start),
-    endDatePlan: toB24DateTime(end),
+// --- Локальные «размещения» задач на сетке (планирование) -----------------
+// Размещение задачи в ячейке НЕ меняет саму задачу в Битрикс24: ни плановые
+// даты, ни дедлайн, ни учёт времени. Одну задачу можно положить в несколько
+// слотов параллельно. Хранится локально в браузере.
+
+const PLACEMENTS_KEY = 'planner_task_placements';
+
+function readPlacements() {
+  try {
+    const arr = JSON.parse(localStorage.getItem(PLACEMENTS_KEY) || '[]');
+    return Array.isArray(arr) ? arr : [];
+  } catch { return []; }
+}
+
+function writePlacements(arr) {
+  try { localStorage.setItem(PLACEMENTS_KEY, JSON.stringify(arr)); } catch (e) { /* приватный режим */ }
+}
+
+function addPlacement({ taskId, title, userId, start, end }) {
+  const arr = readPlacements();
+  arr.push({
+    id: 'pl_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7),
+    taskId: String(taskId),
+    title: title || 'Задача',
+    userId: String(userId),
+    start: start.toISOString(),
+    end: end.toISOString(),
   });
+  writePlacements(arr);
+}
+
+function updatePlacement(id, { start, end }) {
+  const arr = readPlacements();
+  const p = arr.find((x) => x.id === id);
+  if (!p) return;
+  if (start) p.start = start.toISOString();
+  if (end) p.end = end.toISOString();
+  writePlacements(arr);
+}
+
+function removePlacement(id) {
+  writePlacements(readPlacements().filter((x) => x.id !== id));
+}
+
+// Размещения сотрудника в виде item-ов для рендера календаря.
+function placementItems(userId) {
+  return readPlacements()
+    .filter((p) => String(p.userId) === String(userId))
+    .map((p) => ({
+      id: 'place_' + p.id,
+      localId: p.id,
+      kind: 'placement',
+      userId: String(p.userId),
+      taskId: p.taskId,
+      title: p.title,
+      description: '',
+      start: new Date(p.start),
+      end: new Date(p.end),
+      allDay: false,
+      status: null,
+      hoursPlan: 0, hoursFact: 0, hoursToday: 0,
+      raw: p,
+    }));
 }
 
 // Список задач сотрудника для привязки (активные, не завершённые).
@@ -1025,13 +1103,16 @@ async function loadUserTasksForPick(userId) {
 }
 
 async function createEvent({ name, userId, description, start, end, kind }) {
+  // Обёртка вызывает calendar.event.add — ему обязательны from/to (а не
+  // dateFrom/dateTo). Шлём оба варианта для совместимости.
+  const from = toB24DateTime(start);
+  const to = toB24DateTime(end);
   return apiSend('/calendar-events', 'POST', {
     type: 'user',
     ownerId: userId,
     name,
     description: description || '',
-    dateFrom: toB24DateTime(start),
-    dateTo: toB24DateTime(end),
+    from, to, dateFrom: from, dateTo: to,
     accessibility: kind === 'absence' ? 'absent' : 'busy',
   });
 }
@@ -1040,8 +1121,8 @@ async function updateEvent(rawId, userId, { name, description, start, end, kind 
   const body = { type: 'user', ownerId: userId };
   if (name != null) body.name = name;
   if (description != null) body.description = description;
-  if (start) body.dateFrom = toB24DateTime(start);
-  if (end) body.dateTo = toB24DateTime(end);
+  if (start) { const f = toB24DateTime(start); body.from = f; body.dateFrom = f; }
+  if (end) { const t = toB24DateTime(end); body.to = t; body.dateTo = t; }
   if (kind) body.accessibility = kind === 'absence' ? 'absent' : 'busy';
   return apiSend('/calendar-events/' + rawId, 'PATCH', body);
 }
@@ -1102,7 +1183,7 @@ function buildHtml(item) {
   const rows = [];
   rows.push(`<div class="tooltip__title">${escapeHtml(item.title)}</div>`);
 
-  const kindLabel = { task: 'Задача', event: 'Встреча/событие', absence: 'Отсутствие' }[item.kind];
+  const kindLabel = { task: 'Задача', event: 'Встреча/событие', absence: 'Отсутствие', placement: 'Задача (планирование)' }[item.kind];
   rows.push(`<div class="tooltip__row"><b>Тип:</b> ${kindLabel}</div>`);
 
   const timeStr = item.allDay
@@ -1230,7 +1311,7 @@ async function openPickTask({ user, start, end }) {
   const body = document.createElement('div');
   body.className = 'modal__body';
   body.innerHTML = '<div class="form__loading">Загрузка задач…</div>';
-  const modal = openModal({ title: 'Привязать задачу к слоту', bodyEl: body, width: 460 });
+  const modal = openModal({ title: 'Задача в планирование', bodyEl: body, width: 460 });
 
   let tasks;
   try {
@@ -1242,6 +1323,9 @@ async function openPickTask({ user, start, end }) {
     body.innerHTML = '<div class="form__loading">У сотрудника нет активных задач.</div>';
     return;
   }
+  body.appendChild(metaLine('Задача ляжет в выбранный слот только для планирования — ' +
+    'сама задача в Битрикс24 (сроки, учёт времени) не меняется. Одну задачу можно ' +
+    'разместить в нескольких слотах.'));
   const search = inputRow('Поиск', 'text', '');
   body.appendChild(search.row);
 
@@ -1258,8 +1342,8 @@ async function openPickTask({ user, start, end }) {
       item.textContent = t.title;
       item.addEventListener('click', async () => {
         try {
-          await attachTaskToSlot(t.id, start, end);
-          showToast('Задача привязана к слоту', 'success');
+          addPlacement({ taskId: t.id, title: t.title, userId: user.id, start, end });
+          showToast('Задача добавлена в планирование', 'success');
           modal.destroy();
           await bus.reloadWeek();
         } catch (e) { showError(e); }
@@ -1338,27 +1422,26 @@ function openEventForm({ mode, kind, user, start, end, item }) {
   body.className = 'modal__body';
 
   const isEdit = mode === 'edit';
-  const realKind = isEdit ? item.kind : kind;
+  const initialKind = isEdit ? item.kind : (kind || 'event');
   const u = user || selectedUsers().find((x) => x.id === item.userId) || { id: item && item.userId, name: '' };
-  const isAbsence = realKind === 'absence';
 
-  const fName = inputRow(isAbsence ? 'Причина отсутствия *' : 'Название встречи *', 'text', isEdit ? item.title : '');
+  const fKind = selectRow('Тип', [['event', 'Встреча'], ['absence', 'Отсутствие']], initialKind);
+  const fName = inputRow('Название *', 'text', isEdit ? item.title : '');
   const fStart = inputRow('Начало', 'datetime-local', toDateTimeInputValue(isEdit ? item.start : start));
   const fEnd = inputRow('Окончание', 'datetime-local', toDateTimeInputValue(isEdit ? item.end : end));
   const fDesc = textareaRow('Описание', isEdit ? stripHtml(item.description) : '');
 
   body.appendChild(metaLine(`Сотрудник: ${u.name || ('ID ' + u.id)}`));
+  body.appendChild(fKind.row);
   body.appendChild(fName.row);
   body.appendChild(fStart.row);
   body.appendChild(fEnd.row);
   body.appendChild(fDesc.row);
 
-  const title = isAbsence
-    ? (isEdit ? 'Редактирование отсутствия' : 'Добавить отсутствие')
-    : (isEdit ? 'Редактирование встречи' : 'Создать встречу');
-  const modal = openModal({ title, bodyEl: body });
+  const modal = openModal({ title: isEdit ? 'Редактирование события' : 'Создать событие', bodyEl: body });
 
   addFooter(body, modal, async () => {
+    const kindVal = fKind.input.value === 'absence' ? 'absence' : 'event';
     const name = fName.input.value.trim();
     const s = new Date(fStart.input.value);
     const e = new Date(fEnd.input.value);
@@ -1366,19 +1449,64 @@ function openEventForm({ mode, kind, user, start, end, item }) {
     if (!(e > s)) throw new Error('Окончание должно быть позже начала');
 
     if (isEdit) {
-      await updateEvent(item.rawId, u.id, { name, description: fDesc.input.value, start: s, end: e, kind: realKind });
-      showToast(isAbsence ? 'Отсутствие обновлено' : 'Встреча обновлена', 'success');
+      await updateEvent(item.rawId, u.id, { name, description: fDesc.input.value, start: s, end: e, kind: kindVal });
+      showToast('Событие обновлено', 'success');
     } else {
-      await createEvent({ name, userId: u.id, description: fDesc.input.value, start: s, end: e, kind: realKind });
-      showToast(isAbsence ? 'Отсутствие добавлено' : 'Встреча создана', 'success');
+      await createEvent({ name, userId: u.id, description: fDesc.input.value, start: s, end: e, kind: kindVal });
+      showToast(kindVal === 'absence' ? 'Отсутствие добавлено' : 'Встреча создана', 'success');
     }
   });
+}
+
+// --- Редактирование размещения задачи (только планирование) ----------------
+
+function openPlacementForm(item) {
+  const body = document.createElement('div');
+  body.className = 'modal__body';
+
+  const fStart = inputRow('Начало', 'datetime-local', toDateTimeInputValue(item.start));
+  const fEnd = inputRow('Окончание', 'datetime-local', toDateTimeInputValue(item.end));
+
+  body.appendChild(metaLine(`Задача: ${item.title}`));
+  body.appendChild(fStart.row);
+  body.appendChild(fEnd.row);
+  body.appendChild(metaLine('Это только планирование на сетке — сама задача в Битрикс24 не меняется.'));
+
+  const modal = openModal({ title: 'Планирование задачи', bodyEl: body });
+
+  const footer = document.createElement('div');
+  footer.className = 'modal__footer';
+  const del = document.createElement('button');
+  del.className = 'btn btn--ghost';
+  del.textContent = 'Убрать из планирования';
+  del.addEventListener('click', async () => {
+    removePlacement(item.localId);
+    modal.destroy();
+    showToast('Убрано из планирования', 'success');
+    await bus.reloadWeek();
+  });
+  const save = document.createElement('button');
+  save.className = 'btn btn--primary';
+  save.textContent = 'Сохранить';
+  save.addEventListener('click', async () => {
+    const s = new Date(fStart.input.value);
+    const e = new Date(fEnd.input.value);
+    if (!(e > s)) { showError(new Error('Окончание должно быть позже начала')); return; }
+    updatePlacement(item.localId, { start: s, end: e });
+    modal.destroy();
+    showToast('Планирование обновлено', 'success');
+    await bus.reloadWeek();
+  });
+  footer.appendChild(del);
+  footer.appendChild(save);
+  body.appendChild(footer);
 }
 
 // --- Диспетчер редактирования по типу сущности ----------------------------
 
 function openEditModal(item) {
   if (item.kind === 'task') openTaskForm({ mode: 'edit', item });
+  else if (item.kind === 'placement') openPlacementForm(item);
   else openEventForm({ mode: 'edit', item });
 }
 
@@ -1590,7 +1718,7 @@ function buildSubColumn(day, user, minColWidth) {
     .filter(Boolean);
   layoutLanes(dayItems);
   for (const g of dayItems) {
-    sub.appendChild(buildBlock(g));
+    sub.appendChild(buildBlock(g, day));
   }
   return sub;
 }
@@ -1662,7 +1790,7 @@ function layoutLanes(geoms) {
 
 // --- DOM блока ------------------------------------------------------------
 
-function buildBlock(g) {
+function buildBlock(g, day) {
   const { item } = g;
   const block = el('div', `cal-block cal-block--${item.kind}`);
   const colors = COLORS[item.kind];
@@ -1703,6 +1831,15 @@ function buildBlock(g) {
   pencil.addEventListener('click', (e) => { e.stopPropagation(); openEditModal(item); });
   block.appendChild(pencil);
 
+  // Ручки изменения длительности по краям — для планируемых задач и событий.
+  // Тянем границу мышью, попап редактирования при этом не открывается.
+  const resizable = !item.allDay && !g.outOfGrid &&
+    (item.kind === 'placement' || item.kind === 'event' || item.kind === 'absence');
+  if (resizable) {
+    block.appendChild(buildResizeHandle('top', g, day, item, block));
+    block.appendChild(buildResizeHandle('bottom', g, day, item, block));
+  }
+
   // Взаимодействие.
   block.addEventListener('dblclick', (e) => { e.stopPropagation(); openEditModal(item); });
   block.addEventListener('mouseenter', (e) => showTooltip(item, e.clientX, e.clientY));
@@ -1710,6 +1847,86 @@ function buildBlock(g) {
   block.addEventListener('mouseleave', hideTooltip);
 
   return block;
+}
+
+// --- Изменение длительности перетаскиванием края ---------------------------
+
+function buildResizeHandle(edge, g, day, item, block) {
+  const handle = el('div', `cal-block__resize cal-block__resize--${edge}`);
+  handle.addEventListener('mousedown', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    hideTooltip();
+    startResize(edge, g, day, item, block, e.clientY);
+  });
+  // Гасим клики/двойные клики на ручке, чтобы не открыть попап.
+  handle.addEventListener('click', (e) => e.stopPropagation());
+  handle.addEventListener('dblclick', (e) => e.stopPropagation());
+  return handle;
+}
+
+function startResize(edge, g, day, item, block, startY) {
+  const origTop = g.top;
+  const origHeight = g.height;
+  const minPx = GRID.slotHeightPx; // минимум 30 минут
+  let curTop = origTop;
+  let curHeight = origHeight;
+
+  const onMove = (ev) => {
+    const dy = ev.clientY - startY;
+    if (edge === 'top') {
+      let top = origTop + dy;
+      top = Math.max(0, Math.min(top, origTop + origHeight - minPx));
+      curTop = top;
+      curHeight = origTop + origHeight - top;
+    } else {
+      let height = origHeight + dy;
+      height = Math.max(minPx, Math.min(height, BODY_HEIGHT - origTop));
+      curHeight = height;
+    }
+    block.style.top = curTop + 'px';
+    block.style.height = curHeight + 'px';
+  };
+
+  const onUp = async () => {
+    document.removeEventListener('mousemove', onMove);
+    document.removeEventListener('mouseup', onUp);
+    document.body.classList.remove('is-resizing');
+
+    // Привязка к 30-минутной сетке.
+    const snap = (px) => Math.round(px / GRID.slotHeightPx) * GRID.slotHeightPx;
+    let top = snap(curTop);
+    let height = Math.max(GRID.slotHeightPx, snap(curHeight));
+    if (top + height > BODY_HEIGHT) height = BODY_HEIGHT - top;
+
+    const { start, end } = pxToTimes(day, top, height);
+    if (!(end > start)) { bus.reloadWeek(); return; }
+    try {
+      if (item.kind === 'placement') {
+        updatePlacement(item.localId, { start, end });
+      } else {
+        await updateEvent(item.rawId, item.userId, { start, end, kind: item.kind });
+      }
+    } catch (e) {
+      showError(e);
+    }
+    await bus.reloadWeek();
+  };
+
+  document.body.classList.add('is-resizing');
+  document.addEventListener('mousemove', onMove);
+  document.addEventListener('mouseup', onUp);
+}
+
+// Переводит вертикальную геометрию (px) в интервал времени дня.
+function pxToTimes(day, topPx, heightPx) {
+  const gridTop = startOfDay(day);
+  gridTop.setHours(GRID.workStartHour, 0, 0, 0);
+  const startMin = (topPx / GRID.slotHeightPx) * GRID.slotMinutes;
+  const durMin = (heightPx / GRID.slotHeightPx) * GRID.slotMinutes;
+  const start = new Date(gridTop.getTime() + startMin * 60000);
+  const end = new Date(start.getTime() + durMin * 60000);
+  return { start, end };
 }
 
 function edgeMark(pos, text) {

@@ -17,7 +17,7 @@ function buildHtml(item) {
   const rows = [];
   rows.push(`<div class="tooltip__title">${escapeHtml(item.title)}</div>`);
 
-  const kindLabel = { task: 'Задача', event: 'Встреча/событие', absence: 'Отсутствие' }[item.kind];
+  const kindLabel = { task: 'Задача', event: 'Встреча/событие', absence: 'Отсутствие', placement: 'Задача (планирование)' }[item.kind];
   rows.push(`<div class="tooltip__row"><b>Тип:</b> ${kindLabel}</div>`);
 
   const timeStr = item.allDay

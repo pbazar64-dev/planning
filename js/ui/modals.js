@@ -2,8 +2,8 @@
 // выбор существующей задачи для привязки к слоту.
 
 import {
-  createTask, updateTask, attachTaskToSlot, loadUserTasksForPick,
-  createEvent, updateEvent,
+  createTask, updateTask, addPlacement, updatePlacement, removePlacement,
+  loadUserTasksForPick, createEvent, updateEvent,
 } from '../data.js';
 import { TASK_STATUS } from '../config.js';
 import { toDateTimeInputValue, formatTime, formatDayLabel } from '../dates.js';
@@ -80,7 +80,7 @@ export async function openPickTask({ user, start, end }) {
   const body = document.createElement('div');
   body.className = 'modal__body';
   body.innerHTML = '<div class="form__loading">Загрузка задач…</div>';
-  const modal = openModal({ title: 'Привязать задачу к слоту', bodyEl: body, width: 460 });
+  const modal = openModal({ title: 'Задача в планирование', bodyEl: body, width: 460 });
 
   let tasks;
   try {
@@ -92,6 +92,9 @@ export async function openPickTask({ user, start, end }) {
     body.innerHTML = '<div class="form__loading">У сотрудника нет активных задач.</div>';
     return;
   }
+  body.appendChild(metaLine('Задача ляжет в выбранный слот только для планирования — ' +
+    'сама задача в Битрикс24 (сроки, учёт времени) не меняется. Одну задачу можно ' +
+    'разместить в нескольких слотах.'));
   const search = inputRow('Поиск', 'text', '');
   body.appendChild(search.row);
 
@@ -108,8 +111,8 @@ export async function openPickTask({ user, start, end }) {
       item.textContent = t.title;
       item.addEventListener('click', async () => {
         try {
-          await attachTaskToSlot(t.id, start, end);
-          showToast('Задача привязана к слоту', 'success');
+          addPlacement({ taskId: t.id, title: t.title, userId: user.id, start, end });
+          showToast('Задача добавлена в планирование', 'success');
           modal.destroy();
           await bus.reloadWeek();
         } catch (e) { showError(e); }
@@ -188,27 +191,26 @@ export function openEventForm({ mode, kind, user, start, end, item }) {
   body.className = 'modal__body';
 
   const isEdit = mode === 'edit';
-  const realKind = isEdit ? item.kind : kind;
+  const initialKind = isEdit ? item.kind : (kind || 'event');
   const u = user || selectedUsers().find((x) => x.id === item.userId) || { id: item && item.userId, name: '' };
-  const isAbsence = realKind === 'absence';
 
-  const fName = inputRow(isAbsence ? 'Причина отсутствия *' : 'Название встречи *', 'text', isEdit ? item.title : '');
+  const fKind = selectRow('Тип', [['event', 'Встреча'], ['absence', 'Отсутствие']], initialKind);
+  const fName = inputRow('Название *', 'text', isEdit ? item.title : '');
   const fStart = inputRow('Начало', 'datetime-local', toDateTimeInputValue(isEdit ? item.start : start));
   const fEnd = inputRow('Окончание', 'datetime-local', toDateTimeInputValue(isEdit ? item.end : end));
   const fDesc = textareaRow('Описание', isEdit ? stripHtml(item.description) : '');
 
   body.appendChild(metaLine(`Сотрудник: ${u.name || ('ID ' + u.id)}`));
+  body.appendChild(fKind.row);
   body.appendChild(fName.row);
   body.appendChild(fStart.row);
   body.appendChild(fEnd.row);
   body.appendChild(fDesc.row);
 
-  const title = isAbsence
-    ? (isEdit ? 'Редактирование отсутствия' : 'Добавить отсутствие')
-    : (isEdit ? 'Редактирование встречи' : 'Создать встречу');
-  const modal = openModal({ title, bodyEl: body });
+  const modal = openModal({ title: isEdit ? 'Редактирование события' : 'Создать событие', bodyEl: body });
 
   addFooter(body, modal, async () => {
+    const kindVal = fKind.input.value === 'absence' ? 'absence' : 'event';
     const name = fName.input.value.trim();
     const s = new Date(fStart.input.value);
     const e = new Date(fEnd.input.value);
@@ -216,19 +218,64 @@ export function openEventForm({ mode, kind, user, start, end, item }) {
     if (!(e > s)) throw new Error('Окончание должно быть позже начала');
 
     if (isEdit) {
-      await updateEvent(item.rawId, u.id, { name, description: fDesc.input.value, start: s, end: e, kind: realKind });
-      showToast(isAbsence ? 'Отсутствие обновлено' : 'Встреча обновлена', 'success');
+      await updateEvent(item.rawId, u.id, { name, description: fDesc.input.value, start: s, end: e, kind: kindVal });
+      showToast('Событие обновлено', 'success');
     } else {
-      await createEvent({ name, userId: u.id, description: fDesc.input.value, start: s, end: e, kind: realKind });
-      showToast(isAbsence ? 'Отсутствие добавлено' : 'Встреча создана', 'success');
+      await createEvent({ name, userId: u.id, description: fDesc.input.value, start: s, end: e, kind: kindVal });
+      showToast(kindVal === 'absence' ? 'Отсутствие добавлено' : 'Встреча создана', 'success');
     }
   });
+}
+
+// --- Редактирование размещения задачи (только планирование) ----------------
+
+export function openPlacementForm(item) {
+  const body = document.createElement('div');
+  body.className = 'modal__body';
+
+  const fStart = inputRow('Начало', 'datetime-local', toDateTimeInputValue(item.start));
+  const fEnd = inputRow('Окончание', 'datetime-local', toDateTimeInputValue(item.end));
+
+  body.appendChild(metaLine(`Задача: ${item.title}`));
+  body.appendChild(fStart.row);
+  body.appendChild(fEnd.row);
+  body.appendChild(metaLine('Это только планирование на сетке — сама задача в Битрикс24 не меняется.'));
+
+  const modal = openModal({ title: 'Планирование задачи', bodyEl: body });
+
+  const footer = document.createElement('div');
+  footer.className = 'modal__footer';
+  const del = document.createElement('button');
+  del.className = 'btn btn--ghost';
+  del.textContent = 'Убрать из планирования';
+  del.addEventListener('click', async () => {
+    removePlacement(item.localId);
+    modal.destroy();
+    showToast('Убрано из планирования', 'success');
+    await bus.reloadWeek();
+  });
+  const save = document.createElement('button');
+  save.className = 'btn btn--primary';
+  save.textContent = 'Сохранить';
+  save.addEventListener('click', async () => {
+    const s = new Date(fStart.input.value);
+    const e = new Date(fEnd.input.value);
+    if (!(e > s)) { showError(new Error('Окончание должно быть позже начала')); return; }
+    updatePlacement(item.localId, { start: s, end: e });
+    modal.destroy();
+    showToast('Планирование обновлено', 'success');
+    await bus.reloadWeek();
+  });
+  footer.appendChild(del);
+  footer.appendChild(save);
+  body.appendChild(footer);
 }
 
 // --- Диспетчер редактирования по типу сущности ----------------------------
 
 export function openEditModal(item) {
   if (item.kind === 'task') openTaskForm({ mode: 'edit', item });
+  else if (item.kind === 'placement') openPlacementForm(item);
   else openEventForm({ mode: 'edit', item });
 }
 

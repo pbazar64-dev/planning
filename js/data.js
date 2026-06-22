@@ -109,6 +109,12 @@ export async function loadWeekData(userIds, weekDate) {
     }
   }));
 
+  // Локальные размещения задач (планирование) — поверх данных из Битрикс24.
+  for (const id of userIds) {
+    const items = byUser.get(String(id));
+    for (const p of placementItems(id)) items.push(p);
+  }
+
   await enrichTodayLogged(byUser);
   return byUser;
 }
@@ -284,12 +290,69 @@ export async function updateTask(rawId, { title, description, start, end, hoursP
   return apiSend('/tasks/' + rawId, 'PATCH', body);
 }
 
-// Привязать существующую задачу к слоту = задать плановые даты.
-export async function attachTaskToSlot(rawId, start, end) {
-  return apiSend('/tasks/' + rawId, 'PATCH', {
-    startDatePlan: toB24DateTime(start),
-    endDatePlan: toB24DateTime(end),
+// --- Локальные «размещения» задач на сетке (планирование) -----------------
+// Размещение задачи в ячейке НЕ меняет саму задачу в Битрикс24: ни плановые
+// даты, ни дедлайн, ни учёт времени. Одну задачу можно положить в несколько
+// слотов параллельно. Хранится локально в браузере.
+
+const PLACEMENTS_KEY = 'planner_task_placements';
+
+function readPlacements() {
+  try {
+    const arr = JSON.parse(localStorage.getItem(PLACEMENTS_KEY) || '[]');
+    return Array.isArray(arr) ? arr : [];
+  } catch { return []; }
+}
+
+function writePlacements(arr) {
+  try { localStorage.setItem(PLACEMENTS_KEY, JSON.stringify(arr)); } catch (e) { /* приватный режим */ }
+}
+
+export function addPlacement({ taskId, title, userId, start, end }) {
+  const arr = readPlacements();
+  arr.push({
+    id: 'pl_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7),
+    taskId: String(taskId),
+    title: title || 'Задача',
+    userId: String(userId),
+    start: start.toISOString(),
+    end: end.toISOString(),
   });
+  writePlacements(arr);
+}
+
+export function updatePlacement(id, { start, end }) {
+  const arr = readPlacements();
+  const p = arr.find((x) => x.id === id);
+  if (!p) return;
+  if (start) p.start = start.toISOString();
+  if (end) p.end = end.toISOString();
+  writePlacements(arr);
+}
+
+export function removePlacement(id) {
+  writePlacements(readPlacements().filter((x) => x.id !== id));
+}
+
+// Размещения сотрудника в виде item-ов для рендера календаря.
+function placementItems(userId) {
+  return readPlacements()
+    .filter((p) => String(p.userId) === String(userId))
+    .map((p) => ({
+      id: 'place_' + p.id,
+      localId: p.id,
+      kind: 'placement',
+      userId: String(p.userId),
+      taskId: p.taskId,
+      title: p.title,
+      description: '',
+      start: new Date(p.start),
+      end: new Date(p.end),
+      allDay: false,
+      status: null,
+      hoursPlan: 0, hoursFact: 0, hoursToday: 0,
+      raw: p,
+    }));
 }
 
 // Список задач сотрудника для привязки (активные, не завершённые).
@@ -312,13 +375,16 @@ export async function loadUserTasksForPick(userId) {
 }
 
 export async function createEvent({ name, userId, description, start, end, kind }) {
+  // Обёртка вызывает calendar.event.add — ему обязательны from/to (а не
+  // dateFrom/dateTo). Шлём оба варианта для совместимости.
+  const from = toB24DateTime(start);
+  const to = toB24DateTime(end);
   return apiSend('/calendar-events', 'POST', {
     type: 'user',
     ownerId: userId,
     name,
     description: description || '',
-    dateFrom: toB24DateTime(start),
-    dateTo: toB24DateTime(end),
+    from, to, dateFrom: from, dateTo: to,
     accessibility: kind === 'absence' ? 'absent' : 'busy',
   });
 }
@@ -327,8 +393,8 @@ export async function updateEvent(rawId, userId, { name, description, start, end
   const body = { type: 'user', ownerId: userId };
   if (name != null) body.name = name;
   if (description != null) body.description = description;
-  if (start) body.dateFrom = toB24DateTime(start);
-  if (end) body.dateTo = toB24DateTime(end);
+  if (start) { const f = toB24DateTime(start); body.from = f; body.dateFrom = f; }
+  if (end) { const t = toB24DateTime(end); body.to = t; body.dateTo = t; }
   if (kind) body.accessibility = kind === 'absence' ? 'absent' : 'busy';
   return apiSend('/calendar-events/' + rawId, 'PATCH', body);
 }

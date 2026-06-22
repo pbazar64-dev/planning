@@ -218,6 +218,19 @@ body.is-loading .app-header__progress {
 .cal-block__edge--top { top: 0; }
 .cal-block__edge--bottom { bottom: 0; }
 
+/* Планируемая задача — пунктирная рамка, чтобы отличать от реальных сущностей. */
+.cal-block--placement { border-style: dashed; }
+
+/* Ручки изменения длительности по краям ячейки. */
+.cal-block__resize {
+  position: absolute; left: 0; right: 0; height: 7px;
+  cursor: ns-resize; z-index: 4;
+}
+.cal-block__resize--top { top: 0; }
+.cal-block__resize--bottom { bottom: 0; }
+.cal-block:hover .cal-block__resize { background: rgba(0,0,0,.08); }
+body.is-resizing { cursor: ns-resize; user-select: none; }
+
 /* --- Тултип -------------------------------------------------------------- */
 
 .tooltip {

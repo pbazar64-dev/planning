@@ -11,6 +11,9 @@ import {
 } from '../dates.js';
 import { showTooltip, moveTooltip, hideTooltip } from './tooltip.js';
 import { openSlotMenu, openEditModal } from './modals.js';
+import { updatePlacement, updateEvent } from '../data.js';
+import { bus } from '../bus.js';
+import { showError } from './toast.js';
 
 const SLOTS_PER_DAY = (GRID.workEndHour - GRID.workStartHour) * (60 / GRID.slotMinutes); // 20
 const BODY_HEIGHT = SLOTS_PER_DAY * GRID.slotHeightPx; // 1000px
@@ -126,7 +129,7 @@ function buildSubColumn(day, user, minColWidth) {
     .filter(Boolean);
   layoutLanes(dayItems);
   for (const g of dayItems) {
-    sub.appendChild(buildBlock(g));
+    sub.appendChild(buildBlock(g, day));
   }
   return sub;
 }
@@ -198,7 +201,7 @@ function layoutLanes(geoms) {
 
 // --- DOM блока ------------------------------------------------------------
 
-function buildBlock(g) {
+function buildBlock(g, day) {
   const { item } = g;
   const block = el('div', `cal-block cal-block--${item.kind}`);
   const colors = COLORS[item.kind];
@@ -239,6 +242,15 @@ function buildBlock(g) {
   pencil.addEventListener('click', (e) => { e.stopPropagation(); openEditModal(item); });
   block.appendChild(pencil);
 
+  // Ручки изменения длительности по краям — для планируемых задач и событий.
+  // Тянем границу мышью, попап редактирования при этом не открывается.
+  const resizable = !item.allDay && !g.outOfGrid &&
+    (item.kind === 'placement' || item.kind === 'event' || item.kind === 'absence');
+  if (resizable) {
+    block.appendChild(buildResizeHandle('top', g, day, item, block));
+    block.appendChild(buildResizeHandle('bottom', g, day, item, block));
+  }
+
   // Взаимодействие.
   block.addEventListener('dblclick', (e) => { e.stopPropagation(); openEditModal(item); });
   block.addEventListener('mouseenter', (e) => showTooltip(item, e.clientX, e.clientY));
@@ -246,6 +258,86 @@ function buildBlock(g) {
   block.addEventListener('mouseleave', hideTooltip);
 
   return block;
+}
+
+// --- Изменение длительности перетаскиванием края ---------------------------
+
+function buildResizeHandle(edge, g, day, item, block) {
+  const handle = el('div', `cal-block__resize cal-block__resize--${edge}`);
+  handle.addEventListener('mousedown', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    hideTooltip();
+    startResize(edge, g, day, item, block, e.clientY);
+  });
+  // Гасим клики/двойные клики на ручке, чтобы не открыть попап.
+  handle.addEventListener('click', (e) => e.stopPropagation());
+  handle.addEventListener('dblclick', (e) => e.stopPropagation());
+  return handle;
+}
+
+function startResize(edge, g, day, item, block, startY) {
+  const origTop = g.top;
+  const origHeight = g.height;
+  const minPx = GRID.slotHeightPx; // минимум 30 минут
+  let curTop = origTop;
+  let curHeight = origHeight;
+
+  const onMove = (ev) => {
+    const dy = ev.clientY - startY;
+    if (edge === 'top') {
+      let top = origTop + dy;
+      top = Math.max(0, Math.min(top, origTop + origHeight - minPx));
+      curTop = top;
+      curHeight = origTop + origHeight - top;
+    } else {
+      let height = origHeight + dy;
+      height = Math.max(minPx, Math.min(height, BODY_HEIGHT - origTop));
+      curHeight = height;
+    }
+    block.style.top = curTop + 'px';
+    block.style.height = curHeight + 'px';
+  };
+
+  const onUp = async () => {
+    document.removeEventListener('mousemove', onMove);
+    document.removeEventListener('mouseup', onUp);
+    document.body.classList.remove('is-resizing');
+
+    // Привязка к 30-минутной сетке.
+    const snap = (px) => Math.round(px / GRID.slotHeightPx) * GRID.slotHeightPx;
+    let top = snap(curTop);
+    let height = Math.max(GRID.slotHeightPx, snap(curHeight));
+    if (top + height > BODY_HEIGHT) height = BODY_HEIGHT - top;
+
+    const { start, end } = pxToTimes(day, top, height);
+    if (!(end > start)) { bus.reloadWeek(); return; }
+    try {
+      if (item.kind === 'placement') {
+        updatePlacement(item.localId, { start, end });
+      } else {
+        await updateEvent(item.rawId, item.userId, { start, end, kind: item.kind });
+      }
+    } catch (e) {
+      showError(e);
+    }
+    await bus.reloadWeek();
+  };
+
+  document.body.classList.add('is-resizing');
+  document.addEventListener('mousemove', onMove);
+  document.addEventListener('mouseup', onUp);
+}
+
+// Переводит вертикальную геометрию (px) в интервал времени дня.
+function pxToTimes(day, topPx, heightPx) {
+  const gridTop = startOfDay(day);
+  gridTop.setHours(GRID.workStartHour, 0, 0, 0);
+  const startMin = (topPx / GRID.slotHeightPx) * GRID.slotMinutes;
+  const durMin = (heightPx / GRID.slotHeightPx) * GRID.slotMinutes;
+  const start = new Date(gridTop.getTime() + startMin * 60000);
+  const end = new Date(start.getTime() + durMin * 60000);
+  return { start, end };
 }
 
 function edgeMark(pos, text) {
