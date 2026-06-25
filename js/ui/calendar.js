@@ -6,14 +6,17 @@ import {
   state, selectedUsers, itemsFor,
 } from '../state.js';
 import {
-  weekDays, formatDayLabel, isToday, formatTime, formatHM,
+  weekDays, formatDayLabel, isToday, formatTime, formatHM, toDateInputValue,
   startOfDay, addDays, minutesFromGridStart,
 } from '../dates.js';
 import { showTooltip, moveTooltip, hideTooltip } from './tooltip.js';
 import { openSlotMenu, openEditModal } from './modals.js';
-import { updatePlacement, updateEvent, removePlacement, deleteEvent, deleteTask } from '../data.js';
+import {
+  updatePlacement, updateEvent, removePlacement, deleteEvent, deleteTask,
+  addPlacement, createEvent,
+} from '../data.js';
 import { bus } from '../bus.js';
-import { showError } from './toast.js';
+import { showError, showToast } from './toast.js';
 
 const SLOTS_PER_DAY = (GRID.workEndHour - GRID.workStartHour) * (60 / GRID.slotMinutes); // 20
 const BODY_HEIGHT = SLOTS_PER_DAY * GRID.slotHeightPx; // 1000px
@@ -108,6 +111,9 @@ function buildSubColumn(day, user, minColWidth) {
   const sub = el('div', 'cal-subcol');
   sub.style.height = BODY_HEIGHT + 'px';
   if (minColWidth) sub.style.minWidth = minColWidth + 'px';
+  // Метаданные для drop-копирования (Shift+ЛКМ).
+  sub.dataset.userId = user.id;
+  sub.dataset.day = toDateInputValue(day);
 
   // Фоновые 30-минутные слоты (кликабельны для создания).
   for (let i = 0; i < SLOTS_PER_DAY; i++) {
@@ -261,12 +267,82 @@ function buildBlock(g, day) {
   }
 
   // Взаимодействие.
+  // Shift + ЛКМ по ячейке — перетащить КОПИЮ в другую ячейку.
+  block.addEventListener('mousedown', (e) => {
+    if (!e.shiftKey) return;
+    e.preventDefault();
+    e.stopPropagation();
+    hideTooltip();
+    startCopyDrag(e, item);
+  });
   block.addEventListener('dblclick', (e) => { e.stopPropagation(); openEditModal(item); });
   block.addEventListener('mouseenter', (e) => showTooltip(item, e.clientX, e.clientY));
   block.addEventListener('mousemove', (e) => moveTooltip(e.clientX, e.clientY));
   block.addEventListener('mouseleave', hideTooltip);
 
   return block;
+}
+
+// --- Копирование ячейки перетаскиванием (Shift+ЛКМ) ------------------------
+
+function startCopyDrag(e, item) {
+  const ghost = el('div', 'cal-copy-ghost');
+  ghost.textContent = '📋 ' + item.title;
+  document.body.appendChild(ghost);
+  document.body.classList.add('is-copying');
+
+  const move = (ev) => {
+    ghost.style.left = (ev.clientX + 12) + 'px';
+    ghost.style.top = (ev.clientY + 12) + 'px';
+  };
+  move(e);
+
+  const up = async (ev) => {
+    document.removeEventListener('mousemove', move);
+    document.removeEventListener('mouseup', up);
+    document.body.classList.remove('is-copying');
+    ghost.remove();
+
+    const target = resolveDropTarget(ev.clientX, ev.clientY);
+    if (!target) return;
+    const durMs = Math.max(GRID.slotMinutes * 60000, item.end - item.start);
+    const start = target.start;
+    const end = new Date(start.getTime() + durMs);
+    try {
+      if (item.kind === 'event' || item.kind === 'absence') {
+        await createEvent({
+          name: item.title, userId: target.userId,
+          description: item.description || '', start, end, kind: item.kind,
+        });
+      } else {
+        // Задача/размещение -> копия как размещение (саму задачу не трогаем).
+        await addPlacement({
+          taskId: item.taskId || item.rawId, title: item.title,
+          userId: target.userId, start, end,
+        });
+      }
+      showToast('Копия создана', 'success');
+      await bus.reloadWeek();
+    } catch (err) {
+      showError(err);
+    }
+  };
+
+  document.addEventListener('mousemove', move);
+  document.addEventListener('mouseup', up);
+}
+
+// По координатам курсора определяет сотрудника, день и слот для копии.
+function resolveDropTarget(x, y) {
+  const at = document.elementFromPoint(x, y);
+  const sub = at && at.closest ? at.closest('.cal-subcol') : null;
+  if (!sub || !sub.dataset.userId) return null;
+  const rect = sub.getBoundingClientRect();
+  let idx = Math.floor((y - rect.top) / GRID.slotHeightPx);
+  idx = Math.max(0, Math.min(idx, SLOTS_PER_DAY - 1));
+  const [yy, mm, dd] = String(sub.dataset.day).split('-').map(Number);
+  const day = new Date(yy, (mm || 1) - 1, dd || 1);
+  return { userId: sub.dataset.userId, start: slotTime(day, idx) };
 }
 
 async function deleteBlock(item) {
@@ -292,6 +368,7 @@ async function deleteBlock(item) {
 function buildResizeHandle(edge, g, day, item, block) {
   const handle = el('div', `cal-block__resize cal-block__resize--${edge}`);
   handle.addEventListener('mousedown', (e) => {
+    if (e.shiftKey) return; // Shift -> копирование (обработает сам блок)
     e.preventDefault();
     e.stopPropagation();
     hideTooltip();

@@ -70,7 +70,9 @@ export async function saveSelectedUserIds(ids) {
 
 // --- Загрузка данных недели ------------------------------------------------
 
-// Загружает задачи, события и отсутствия для всех сотрудников за неделю.
+// Автоматически грузим ТОЛЬКО события календаря (встречи/отсутствия).
+// Задачи в планировщик автоматически не ставятся — только размещения,
+// которые пользователь добавил вручную через окно планировщика.
 // Возвращает Map<userId, item[]>.
 export async function loadWeekData(userIds, weekDate) {
   const range = weekRangeB24(weekDate);
@@ -79,31 +81,14 @@ export async function loadWeekData(userIds, weekDate) {
   await Promise.all(userIds.map(async (id) => {
     const sid = String(id);
     const items = byUser.get(sid);
-
-    const [planTasks, dlTasks, events] = await Promise.all([
-      searchTasks({ responsibleId: id, '>=startDatePlan': range.from, '<=startDatePlan': range.to }),
-      searchTasks({ responsibleId: id, '>=deadline': range.from, '<=deadline': range.to }),
-      loadUserEvents(id, range),
-    ]);
-
-    // Задачи: объединяем два набора и убираем дубли по id.
-    const taskMap = new Map();
-    for (const t of [...planTasks, ...dlTasks]) {
-      const tid = t.id != null ? t.id : t.ID;
-      if (tid != null) taskMap.set(String(tid), t);
-    }
-    for (const t of taskMap.values()) {
-      const item = mapTask(t, sid);
-      if (item) items.push(item);
-    }
-
+    const events = await loadUserEvents(id, range);
     for (const e of events) {
       const item = mapEvent(e, sid);
       if (item) items.push(item);
     }
   }));
 
-  // Общие размещения задач (планирование) — поверх данных из Битрикс24.
+  // Размещения задач — только добавленные пользователем вручную.
   const placements = await loadPlacements();
   const placementList = [];
   for (const p of placements) {
@@ -116,7 +101,6 @@ export async function loadWeekData(userIds, weekDate) {
   }
   await enrichPlacements(placementList);
 
-  await enrichTodayLogged(byUser);
   return byUser;
 }
 
@@ -173,17 +157,6 @@ async function enrichPlacements(items) {
   }));
 }
 
-async function searchTasks(filter) {
-  try {
-    // Без select — берём полные записи (иначе теряются поля времени/статуса).
-    const data = await apiSend('/tasks/search', 'POST', { filter, limit: 200 });
-    return asArray(data);
-  } catch (e) {
-    console.warn('Не удалось загрузить задачи:', e);
-    return [];
-  }
-}
-
 async function loadUserEvents(id, range) {
   try {
     const data = await apiGet('/calendar-events', {
@@ -194,49 +167,6 @@ async function loadUserEvents(id, range) {
     console.warn('Не удалось загрузить события календаря:', e);
     return [];
   }
-}
-
-function mapTask(t, userId) {
-  const title = t.title || t.TITLE || 'Без названия';
-  const planStart = parseB24Date(t.startDatePlan || t.START_DATE_PLAN);
-  const planEnd = parseB24Date(t.endDatePlan || t.END_DATE_PLAN);
-  const deadline = parseB24Date(t.deadline || t.DEADLINE);
-
-  let start, end;
-  if (planStart && planEnd && planEnd > planStart) {
-    start = planStart;
-    end = planEnd;
-  } else if (deadline) {
-    end = deadline;
-    start = new Date(deadline.getTime() - GRID.slotMinutes * 60 * 1000);
-  } else {
-    return null;
-  }
-
-  const code = toStatusCode(t.status != null ? t.status : t.STATUS);
-  const status = resolveTaskStatus(code, deadline);
-  const timeEstimate = Number(t.timeEstimate || t.TIME_ESTIMATE || 0);
-  const timeSpent = Number(t.timeSpentInLogs || t.TIME_SPENT_IN_LOGS || 0);
-
-  return {
-    id: 'task_' + (t.id || t.ID),
-    rawId: String(t.id || t.ID),
-    kind: 'task',
-    userId,
-    title,
-    description: t.description || t.DESCRIPTION || '',
-    start, end,
-    allDay: false,
-    status,
-    hoursPlan: secondsToHours(timeEstimate),
-    hoursFact: secondsToHours(timeSpent),
-    hoursToday: 0,
-    // Точные значения в секундах — для отображения в формате Ч:ММ.
-    secPlan: timeEstimate,
-    secFact: timeSpent,
-    secToday: 0,
-    raw: t,
-  };
 }
 
 // Статус приходит числом (1..7) либо строкой-перечислением — нормализуем.
@@ -292,33 +222,6 @@ function mapEvent(e, userId) {
     hoursPlan: 0, hoursFact: 0, hoursToday: 0,
     raw: e,
   };
-}
-
-// Заполняет hoursToday для задач (время, залогированное сегодня). Best-effort.
-async function enrichTodayLogged(byUser) {
-  const todayStart = startOfDay(new Date());
-  const todayEnd = addDays(todayStart, 1);
-
-  const taskItems = [];
-  for (const items of byUser.values()) {
-    for (const it of items) if (it.kind === 'task') taskItems.push(it);
-  }
-  if (taskItems.length === 0) return;
-
-  await Promise.all(taskItems.map(async (it) => {
-    try {
-      const rows = asArray(await apiGet('/tasks/' + it.rawId + '/time'));
-      let sec = 0;
-      for (const r of rows) {
-        const created = parseB24Date(r.createdDate || r.CREATED_DATE || r.createdAt);
-        if (created && created >= todayStart && created < todayEnd) {
-          sec += Number(r.seconds || r.SECONDS || 0);
-        }
-      }
-      it.secToday = sec;
-      it.hoursToday = secondsToHours(sec);
-    } catch (e) { /* не критично — оставим 0 */ }
-  }));
 }
 
 // --- Создание и обновление сущностей --------------------------------------

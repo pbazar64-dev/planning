@@ -233,6 +233,16 @@ body.is-loading .app-header__progress {
 .cal-block:hover .cal-block__resize { background: rgba(0,0,0,.08); }
 body.is-resizing { cursor: ns-resize; user-select: none; }
 
+/* Призрак копии при перетаскивании (Shift+ЛКМ). */
+.cal-copy-ghost {
+  position: fixed; z-index: 1001; pointer-events: none;
+  background: #1E88E5; color: #fff; font-size: 11px;
+  padding: 2px 7px; border-radius: 4px; max-width: 220px;
+  overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+  box-shadow: var(--shadow);
+}
+body.is-copying, body.is-copying * { cursor: copy !important; user-select: none; }
+
 /* --- Тултип -------------------------------------------------------------- */
 
 .tooltip {
