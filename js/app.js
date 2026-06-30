@@ -4,6 +4,7 @@ import { init } from './b24.js';
 import { state, emit, subscribe, setSelectedUserIds } from './state.js';
 import {
   loadUsers, loadSelectedUserIds, loadWeekData, migrateLocalPlacements,
+  loadPortalDomain,
 } from './data.js';
 import { weekDays, formatDayLabel, addWeeks, startOfWeek } from './dates.js';
 import { renderCalendar } from './ui/calendar.js';
@@ -44,6 +45,8 @@ async function loadInitialData() {
   } finally {
     state.loading = false; emit();
   }
+  // Домен портала — для ссылок на задачи (best-effort).
+  loadPortalDomain().then((d) => { state.portalDomain = d; });
   // Перенос старых локальных размещений в общее хранилище (разово).
   await migrateLocalPlacements();
   await reloadWeek();

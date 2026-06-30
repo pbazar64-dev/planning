@@ -194,6 +194,8 @@ body.is-loading .app-header__progress {
   overflow: hidden; text-overflow: ellipsis;
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
 }
+.cal-block__title--link { cursor: pointer; }
+.cal-block__title--link:hover { text-decoration: underline; }
 .cal-block__meta {
   display: flex; align-items: center; gap: 5px;
   font-size: 11px; color: #37474F; margin-top: auto;

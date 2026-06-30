@@ -292,6 +292,24 @@ export async function removePlacement(id) {
   await bffRequest('/placements/' + encodeURIComponent(id), { method: 'DELETE' });
 }
 
+// --- Ссылка на задачу в портале -------------------------------------------
+
+export async function loadPortalDomain() {
+  try {
+    const json = await bffRequest('/portal');
+    return (json.data && json.data.portal) || null;
+  } catch (e) {
+    return null;
+  }
+}
+
+// Глубокая ссылка на карточку задачи Битрикс24.
+export function taskUrl(domain, taskId, userId) {
+  if (!domain || !taskId) return null;
+  const uid = userId || 0;
+  return `https://${domain}/company/personal/user/${uid}/tasks/task/view/${taskId}/`;
+}
+
 // Разовая миграция: если у пользователя остались размещения в localStorage
 // (старая версия), переносим их в общее серверное хранилище и чистим локальные.
 export async function migrateLocalPlacements() {

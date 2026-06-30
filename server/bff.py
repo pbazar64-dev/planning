@@ -40,6 +40,24 @@ DATA_DIR = "/opt/app/data"
 PLACEMENTS_FILE = os.path.join(DATA_DIR, "placements.json")
 _lock = threading.Lock()
 
+# Домен портала (для ссылок на задачи). Узнаём через /v1/me по ключу
+# приложения и кэшируем.
+_portal_cache = {"v": None}
+
+
+def _portal_domain():
+    if _portal_cache["v"] or not APP_KEY:
+        return _portal_cache["v"]
+    try:
+        req = urllib.request.Request(UPSTREAM + "/v1/me", method="GET")
+        req.add_header("X-Api-Key", APP_KEY)
+        with urllib.request.urlopen(req, timeout=15) as r:
+            d = json.loads(r.read().decode("utf-8"))
+        _portal_cache["v"] = (d.get("data") or {}).get("portal")
+    except Exception:
+        pass
+    return _portal_cache["v"]
+
 
 def _read_placements():
     try:
@@ -112,6 +130,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
         if path == "/api/whoami":
             return self._send_json(200, {"hasSession": bool(session)})
+
+        if path == "/api/portal":
+            return self._send_json(200, {"success": True, "data": {"portal": _portal_domain()}})
 
         if path == "/api/placements" or path.startswith("/api/placements/"):
             return self._handle_placements(method, path, session)

@@ -13,7 +13,7 @@ import { showTooltip, moveTooltip, hideTooltip } from './tooltip.js';
 import { openSlotMenu, openEditModal } from './modals.js';
 import {
   updatePlacement, updateEvent, removePlacement, deleteEvent, deleteTask,
-  addPlacement, createEvent,
+  addPlacement, createEvent, taskUrl,
 } from '../data.js';
 import { bus } from '../bus.js';
 import { showError, showToast } from './toast.js';
@@ -226,6 +226,17 @@ function buildBlock(g, day) {
   const content = el('div', 'cal-block__content');
   const title = el('div', 'cal-block__title');
   title.textContent = item.title;
+  // Клик по названию запланированной задачи открывает её карточку в портале.
+  if (item.taskId) {
+    title.classList.add('cal-block__title--link');
+    title.title = 'Открыть задачу в Битрикс24';
+    title.addEventListener('click', (e) => {
+      if (e.shiftKey) return; // Shift зарезервирован под копирование
+      e.stopPropagation();
+      const url = taskUrl(state.portalDomain, item.taskId, item.userId);
+      if (url) window.open(url, '_blank', 'noopener');
+    });
+  }
   content.appendChild(title);
 
   if (item.kind === 'task' || item.kind === 'placement') {

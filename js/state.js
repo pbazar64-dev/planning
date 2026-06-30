@@ -7,6 +7,7 @@ const listeners = new Set();
 
 export const state = {
   allUsers: [],          // [{id, name, position, photo}]
+  portalDomain: null,    // домен портала Битрикс24 (для ссылок на задачи)
   selectedUserIds: [],   // выбранные сотрудники (до 5)
   currentWeek: startOfWeek(new Date()),
   dataByUser: new Map(), // Map<userId, item[]>
