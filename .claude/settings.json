@@ -1,0 +1,5 @@
+{
+  "permissions": {
+    "allow": ["Bash(sh scripts/deploy.sh)"]
+  }
+}
