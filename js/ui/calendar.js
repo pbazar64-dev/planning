@@ -223,7 +223,8 @@ function buildBlock(g) {
     const meta = el('div', 'cal-block__meta');
     meta.innerHTML =
       `<span class="cal-block__status" title="${item.status.label}">${item.status.icon}</span>` +
-      `<span class="cal-block__hours">ф:${item.hoursFact}/п:${item.hoursPlan}/с:${item.hoursToday}</span>`;
+      `<span class="cal-block__hours">ф:${item.hoursFact}/п:${item.hoursPlan}/с:${item.hoursToday}</span>` +
+      (item.recurring ? '<span class="cal-block__repeat" title="Повторяется">🔁</span>' : '');
     content.appendChild(meta);
   } else {
     const meta = el('div', 'cal-block__meta');

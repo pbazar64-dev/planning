@@ -4,19 +4,20 @@
 //   { freq: 'none'|'workdays'|'daily'|'weekly'|'monthly',
 //     interval: number,          // «каждые N» дней/недель/месяцев
 //     byDay: ['MO', 'WE', ...],  // дни недели для weekly
-//     endMode: 'count'|'until',
+//     endMode: 'never'|'count'|'until',
 //     count: number,             // сколько раз всего (вместе с первым)
 //     until: Date|null }         // последний день серии (включительно)
 //
-// Встречи и отсутствия повторяются средствами календаря Битрикс24 (rrule),
-// задачи — создаются отдельной задачей на каждое повторение.
+// Все повторения хранятся в календаре Битрикс24 (параметр rrule события):
+// встречи и отсутствия — как есть, а повторяющаяся работа над задачей —
+// серией «слотов задачи» (см. js/data.js). Сама задача в Б24 остаётся одна.
 
-import { startOfDay, startOfWeek, addDays, toDateInputValue, formatDateRu } from './dates.js';
+import { startOfDay, startOfWeek, addDays, formatDateRu, parseB24Date } from './dates.js';
 
-// Предел числа повторений для задач (каждая — отдельный tasks.task.add).
-export const RECUR_MAX_TASKS = 100;
-// Предел горизонта разворачивания серии — 3 года.
-const RECUR_HORIZON_DAYS = 366 * 3;
+// Предел горизонта разворачивания серии — 5 лет.
+const RECUR_HORIZON_DAYS = 366 * 5;
+// Календарь Б24 хранит «бесконечные» серии с окончанием 01.01.2038.
+const RECUR_NEVER_YEAR = 2038;
 
 export const RECUR_FREQS = [
   ['none', 'Не повторять'],
@@ -26,18 +27,25 @@ export const RECUR_FREQS = [
   ['monthly', 'Ежемесячно'],
 ];
 
+export const RECUR_END_MODES = [
+  ['never', 'Без даты окончания'],
+  ['count', 'После количества повторений'],
+  ['until', 'В указанную дату'],
+];
+
 // Коды дней недели в порядке ПН..ВС и соответствие Date.getDay().
 export const RECUR_WEEKDAYS = [
   ['MO', 'ПН'], ['TU', 'ВТ'], ['WE', 'СР'], ['TH', 'ЧТ'], ['FR', 'ПТ'], ['SA', 'СБ'], ['SU', 'ВС'],
 ];
 const RECUR_DAY_BY_JS = ['SU', 'MO', 'TU', 'WE', 'TH', 'FR', 'SA'];
+const RECUR_WORKDAYS = ['MO', 'TU', 'WE', 'TH', 'FR'];
 
 export function weekdayCode(date) {
   return RECUR_DAY_BY_JS[new Date(date).getDay()];
 }
 
 export function isRecurring(rule) {
-  return !!rule && rule.freq && rule.freq !== 'none';
+  return !!rule && !!rule.freq && rule.freq !== 'none';
 }
 
 // Проверка правила перед сохранением. Бросает Error с понятным текстом.
@@ -49,7 +57,7 @@ export function validateRule(rule, start) {
   }
   if (rule.endMode === 'count') {
     if (!(rule.count >= 2)) throw new Error('Количество повторений должно быть не меньше 2');
-  } else {
+  } else if (rule.endMode === 'until') {
     if (!rule.until || isNaN(rule.until)) throw new Error('Укажите дату окончания повторений');
     if (startOfDay(rule.until) < startOfDay(start)) {
       throw new Error('Дата окончания повторений раньше начала');
@@ -57,14 +65,15 @@ export function validateRule(rule, start) {
   }
 }
 
-// Параметр rrule для calendar.event.add.
+// Параметр rrule для calendar.event.add / calendar.event.update.
 export function toB24RRule(rule) {
+  if (!isRecurring(rule)) return null;
   const r = { INTERVAL: rule.interval || 1 };
   switch (rule.freq) {
     case 'workdays':
       r.FREQ = 'WEEKLY';
       r.INTERVAL = 1;
-      r.BYDAY = ['MO', 'TU', 'WE', 'TH', 'FR'];
+      r.BYDAY = [...RECUR_WORKDAYS];
       break;
     case 'daily': r.FREQ = 'DAILY'; break;
     case 'weekly': r.FREQ = 'WEEKLY'; r.BYDAY = [...rule.byDay]; break;
@@ -72,37 +81,108 @@ export function toB24RRule(rule) {
     default: return null;
   }
   if (rule.endMode === 'count') r.COUNT = rule.count;
-  else r.UNTIL = toDateInputValue(rule.until);
+  else if (rule.endMode === 'until') r.UNTIL = formatRuDate(rule.until);
   return r;
 }
 
-// Разворачивает серию в список интервалов { start, end } (первый — исходный).
-// limit — предел количества (для задач).
-export function expandOccurrences(rule, start, end, limit = RECUR_MAX_TASKS) {
-  const duration = end - start;
-  if (!isRecurring(rule)) return [{ start: new Date(start), end: new Date(end) }];
+// «DD.MM.YYYY» — формат даты, который понимает календарь Б24.
+function formatRuDate(date) {
+  const d = new Date(date);
+  const p = (n) => String(n).padStart(2, '0');
+  return `${p(d.getDate())}.${p(d.getMonth() + 1)}.${d.getFullYear()}`;
+}
 
-  const first = startOfDay(start);
-  const firstWeek = startOfWeek(start);
-  const until = rule.endMode === 'until' ? startOfDay(rule.until) : null;
-  const maxCount = rule.endMode === 'count' ? Math.min(rule.count, limit) : limit;
-  const interval = rule.interval || 1;
+// Разбор rrule из календаря Б24 (строка «FREQ=WEEKLY;BYDAY=MO,WE» или объект)
+// в правило формы. Неподдерживаемые правила (ежегодно и т.п.) — null.
+export function parseB24RRule(rr) {
+  if (!rr) return null;
+  const obj = typeof rr === 'string' ? parseRRuleString(rr) : rr;
+  if (!obj || typeof obj !== 'object') return null;
+  const freq = String(obj.FREQ || '').toUpperCase();
+  if (!freq || freq === 'NONE') return null;
 
-  const out = [];
-  for (let i = 0; i <= RECUR_HORIZON_DAYS && out.length < maxCount; i++) {
-    const day = addDays(first, i);
-    if (until && day > until) break;
-    if (!matchesDay(rule, interval, day, first, firstWeek)) continue;
-    const s = new Date(day);
-    s.setHours(start.getHours(), start.getMinutes(), 0, 0);
-    out.push({ start: s, end: new Date(s.getTime() + duration) });
+  const interval = Number(obj.INTERVAL) || 1;
+  const byDay = normalizeByDay(obj.BYDAY);
+  const rule = { freq: '', interval, byDay, endMode: 'never', count: 0, until: null };
+
+  if (freq === 'DAILY') rule.freq = 'daily';
+  else if (freq === 'WEEKLY') {
+    const isWorkdays = interval === 1 && byDay.length === 5 && RECUR_WORKDAYS.every((d) => byDay.includes(d));
+    rule.freq = isWorkdays ? 'workdays' : 'weekly';
+  } else if (freq === 'MONTHLY') rule.freq = 'monthly';
+  else return null;
+
+  const count = Number(obj.COUNT);
+  if (count > 0) {
+    rule.endMode = 'count';
+    rule.count = count;
+  } else if (obj.UNTIL) {
+    const until = parseUntil(obj.UNTIL);
+    if (until && until.getFullYear() < RECUR_NEVER_YEAR) {
+      rule.endMode = 'until';
+      rule.until = until;
+    }
+  }
+  return rule;
+}
+
+function normalizeByDay(v) {
+  if (!v) return [];
+  let arr = v;
+  if (!Array.isArray(arr)) arr = typeof arr === 'object' ? Object.values(arr) : String(arr).split(',');
+  return arr.map((d) => String(d).trim().toUpperCase().slice(-2)).filter((d) => RECUR_DAY_BY_JS.includes(d));
+}
+
+// UNTIL встречается как «DD.MM.YYYY», «YYYY-MM-DD», «YYYYMMDD[T…]» или timestamp.
+function parseUntil(v) {
+  if (typeof v === 'number' || /^\d{9,}$/.test(String(v))) return new Date(Number(v) * 1000);
+  const compact = /^(\d{4})(\d{2})(\d{2})/.exec(String(v));
+  if (compact && !String(v).includes('-')) return new Date(+compact[1], +compact[2] - 1, +compact[3]);
+  const d = parseB24Date(v);
+  return d ? startOfDay(d) : null;
+}
+
+// «FREQ=WEEKLY;INTERVAL=1;BYDAY=MO,WE» -> { FREQ, INTERVAL, BYDAY: [...] }
+function parseRRuleString(str) {
+  const out = {};
+  for (const part of String(str).split(';')) {
+    const [k, v] = part.split('=');
+    if (!k || v == null) continue;
+    const key = k.trim().toUpperCase();
+    out[key] = key === 'BYDAY' ? v.split(',') : v;
   }
   return out;
 }
 
-// Сколько повторений даст правило без учёта предела (для подсказки).
-export function countOccurrences(rule, start, end) {
-  return expandOccurrences(rule, start, end, Infinity).length;
+// Разворачивает серию, начинающуюся с start–end, в вхождения { start, end },
+// попадающие в окно [from, to). Без окна — все вхождения (с ограничением limit).
+export function expandOccurrences(rule, start, end, { from = null, to = null, limit = 1000 } = {}) {
+  const duration = end - start;
+  const inWindow = (s, e) => (!from || e > from) && (!to || s < to);
+  if (!isRecurring(rule)) {
+    return inWindow(start, end) ? [{ start: new Date(start), end: new Date(end) }] : [];
+  }
+
+  const first = startOfDay(start);
+  const firstWeek = startOfWeek(start);
+  const until = rule.endMode === 'until' && rule.until ? startOfDay(rule.until) : null;
+  const maxCount = rule.endMode === 'count' ? rule.count : Infinity;
+  const interval = rule.interval || 1;
+
+  const out = [];
+  let n = 0;
+  for (let i = 0; i <= RECUR_HORIZON_DAYS && n < maxCount && out.length < limit; i++) {
+    const day = addDays(first, i);
+    if (until && day > until) break;
+    if (to && day >= to) break;
+    if (!matchesDay(rule, interval, day, first, firstWeek)) continue;
+    n++;
+    const s = new Date(day);
+    s.setHours(start.getHours(), start.getMinutes(), 0, 0);
+    const e = new Date(s.getTime() + duration);
+    if (inWindow(s, e)) out.push({ start: s, end: e });
+  }
+  return out;
 }
 
 function matchesDay(rule, interval, day, first, firstWeek) {
@@ -132,7 +212,7 @@ function diffDays(a, b) {
   return Math.round((startOfDay(b) - startOfDay(a)) / (24 * 60 * 60 * 1000));
 }
 
-// Человекочитаемое описание: «еженедельно по ПН, СР, 10 раз».
+// Человекочитаемое описание: «Еженедельно по ПН, СР, 10 раз».
 export function describeRule(rule) {
   if (!isRecurring(rule)) return 'Не повторяется';
   const n = rule.interval || 1;
@@ -148,39 +228,14 @@ export function describeRule(rule) {
     case 'monthly': s = n > 1 ? `каждые ${n} мес.` : 'ежемесячно'; break;
     default: s = '';
   }
-  s += rule.endMode === 'count' ? `, ${rule.count} раз` : `, до ${formatDateRu(rule.until)}`;
+  if (rule.endMode === 'count') s += `, ${rule.count} раз`;
+  else if (rule.endMode === 'until' && rule.until) s += `, до ${formatDateRu(rule.until)}`;
+  else s += ', без даты окончания';
   return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
-// Описание rrule, пришедшего из календаря Битрикс24 (строка или объект).
+// Описание rrule из календаря Б24 для тултипа.
 export function describeB24RRule(rr) {
-  if (!rr) return '';
-  const obj = typeof rr === 'string' ? parseRRuleString(rr) : rr;
-  const freq = String(obj.FREQ || '').toUpperCase();
-  const n = Number(obj.INTERVAL) || 1;
-  const labels = {
-    DAILY: n > 1 ? `каждые ${n} дн.` : 'ежедневно',
-    WEEKLY: n > 1 ? `каждые ${n} нед.` : 'еженедельно',
-    MONTHLY: n > 1 ? `каждые ${n} мес.` : 'ежемесячно',
-    YEARLY: n > 1 ? `каждые ${n} г.` : 'ежегодно',
-  };
-  let s = labels[freq] || 'повторяется';
-  let byDay = obj.BYDAY;
-  if (byDay && !Array.isArray(byDay)) byDay = typeof byDay === 'object' ? Object.values(byDay) : String(byDay).split(',');
-  if (freq === 'WEEKLY' && byDay && byDay.length) {
-    const days = RECUR_WEEKDAYS.filter(([c]) => byDay.includes(c)).map(([, l]) => l).join(', ');
-    if (days) s += ` по ${days}`;
-  }
-  return s.charAt(0).toUpperCase() + s.slice(1);
-}
-
-// «FREQ=WEEKLY;INTERVAL=1;BYDAY=MO,WE» -> { FREQ, INTERVAL, BYDAY: [...] }
-function parseRRuleString(str) {
-  const out = {};
-  for (const part of String(str).split(';')) {
-    const [k, v] = part.split('=');
-    if (!k || v == null) continue;
-    out[k.trim().toUpperCase()] = k.trim().toUpperCase() === 'BYDAY' ? v.split(',') : v;
-  }
-  return out;
+  const rule = parseB24RRule(rr);
+  return rule ? describeRule(rule) : 'Повторяется';
 }

@@ -1,15 +1,16 @@
 // Попапы: меню слота, формы создания/редактирования задач, встреч и отсутствий,
-// выбор существующей задачи для привязки к слоту.
+// выбор существующей задачи для привязки к слоту, настройка повторения.
 
 import {
-  createTaskSeries, updateTask, attachTaskToSlot, loadUserTasksForPick,
+  createTaskWithSchedule, updateTask, attachTaskToSlot, loadUserTasksForPick,
+  createTaskSlot, updateTaskSlot, deleteCalendarEvent, loadEventSeries,
   createEvent, updateEvent,
 } from '../data.js';
 import { TASK_STATUS } from '../config.js';
 import { toDateTimeInputValue, toDateInputValue, formatTime, formatDayLabel, addDays } from '../dates.js';
 import {
-  RECUR_FREQS, RECUR_WEEKDAYS, RECUR_MAX_TASKS, weekdayCode, isRecurring,
-  validateRule, describeRule, countOccurrences,
+  RECUR_FREQS, RECUR_END_MODES, RECUR_WEEKDAYS, weekdayCode, isRecurring,
+  validateRule, describeRule,
 } from '../recurrence.js';
 import { selectedUsers } from '../state.js';
 import { bus } from '../bus.js';
@@ -63,7 +64,7 @@ export function openSlotMenu({ user, start, end }) {
 
   const actions = [
     ['＋ Создать задачу', () => { modal.destroy(); openTaskForm({ mode: 'create', user, start, end }); }],
-    ['📋 Выбрать задачу из существующих', () => { modal.destroy(); openPickTask({ user, start, end }); }],
+    ['📋 Запланировать существующую задачу', () => { modal.destroy(); openPickTask({ user, start, end }); }],
     ['📅 Создать встречу', () => { modal.destroy(); openEventForm({ mode: 'create', kind: 'event', user, start, end }); }],
     ['🌴 Добавить отсутствие', () => { modal.destroy(); openEventForm({ mode: 'create', kind: 'absence', user, start, end }); }],
   ];
@@ -79,12 +80,14 @@ export function openSlotMenu({ user, start, end }) {
 }
 
 // --- Выбор существующей задачи --------------------------------------------
+// Задача не копируется и не переносится: в календаре сотрудника создаётся
+// слот работы над ней (при желании — повторяющийся).
 
 export async function openPickTask({ user, start, end }) {
   const body = document.createElement('div');
   body.className = 'modal__body';
   body.innerHTML = '<div class="form__loading">Загрузка задач…</div>';
-  const modal = openModal({ title: 'Привязать задачу к слоту', bodyEl: body, width: 460 });
+  const modal = openModal({ title: 'Запланировать работу над задачей', bodyEl: body, width: 460 });
 
   let tasks;
   try {
@@ -96,7 +99,17 @@ export async function openPickTask({ user, start, end }) {
     body.innerHTML = '<div class="form__loading">У сотрудника нет активных задач.</div>';
     return;
   }
-  const search = inputRow('Поиск', 'text', '');
+  body.appendChild(metaLine(`${user.name} · ${formatDayLabel(start)} · ${formatTime(start)}–${formatTime(end)}`));
+
+  const fStart = inputRow('Начало', 'datetime-local', toDateTimeInputValue(start));
+  const fEnd = inputRow('Окончание', 'datetime-local', toDateTimeInputValue(end));
+  body.appendChild(fStart.row);
+  body.appendChild(fEnd.row);
+  const fRepeat = recurrenceField(fStart.input, fEnd.input, null);
+  body.appendChild(fRepeat.row);
+
+  const search = inputRow('Задача', 'text', '');
+  search.input.placeholder = 'Поиск по названию';
   body.appendChild(search.row);
 
   const list = document.createElement('div');
@@ -112,8 +125,13 @@ export async function openPickTask({ user, start, end }) {
       item.textContent = t.title;
       item.addEventListener('click', async () => {
         try {
-          await attachTaskToSlot(t.id, start, end);
-          showToast('Задача привязана к слоту', 'success');
+          const s = new Date(fStart.input.value);
+          const e = new Date(fEnd.input.value);
+          if (!(e > s)) throw new Error('Окончание должно быть позже начала');
+          const rule = fRepeat.getRule();
+          validateRule(rule, s);
+          await attachTaskToSlot({ taskId: t.id, title: t.title, userId: user.id, start: s, end: e, rule });
+          showToast(isRecurring(rule) ? 'Работа над задачей запланирована с повторением' : 'Задача запланирована в слот', 'success');
           modal.destroy();
           await bus.reloadWeek();
         } catch (e) { showError(e); }
@@ -126,33 +144,54 @@ export async function openPickTask({ user, start, end }) {
 }
 
 // --- Форма задачи (создание/редактирование) -------------------------------
+// Повторение задачи — это повторяющийся слот работы над ней в календаре;
+// задача в Битрикс24 остаётся одна.
 
-export function openTaskForm({ mode, user, start, end, item }) {
+export async function openTaskForm({ mode, user, start, end, item }) {
+  const isEdit = mode === 'edit';
+  const isSlot = isEdit && !!item.slot;
+  const u = user || selectedUsers().find((x) => x.id === item.userId) || { id: item && item.userId, name: '' };
+
+  // Для повторяющегося слота редактируем серию целиком: берём её начало и правило.
+  let series = null;
+  if (isSlot && item.recurring) {
+    try {
+      series = await loadEventSeries(item.slot.eventId);
+    } catch (e) { showError(e); return; }
+  }
+  const seriesRuleUnsupported = !!series && !series.rule;
+
   const body = document.createElement('div');
   body.className = 'modal__body';
 
-  const isEdit = mode === 'edit';
-  const u = user || selectedUsers().find((x) => x.id === item.userId) || { id: item && item.userId, name: '' };
+  const startVal = series ? series.start : (isEdit ? item.start : start);
+  const endVal = series ? series.end : (isEdit ? item.end : end);
 
   const fTitle = inputRow('Название задачи *', 'text', isEdit ? item.title : '');
-  const fStart = inputRow('Начало', 'datetime-local', toDateTimeInputValue(isEdit ? item.start : start));
-  const fEnd = inputRow('Окончание', 'datetime-local', toDateTimeInputValue(isEdit ? item.end : end));
+  const fStart = inputRow(series ? 'Начало серии' : 'Начало', 'datetime-local', toDateTimeInputValue(startVal));
+  const fEnd = inputRow(series ? 'Окончание (первое вхождение)' : 'Окончание', 'datetime-local', toDateTimeInputValue(endVal));
   const fHours = inputRow('Плановые часы', 'number', isEdit ? item.hoursPlan : '');
   fHours.input.step = '0.5'; fHours.input.min = '0';
-  const fDesc = textareaRow('Описание', isEdit ? stripHtml(item.description) : '');
+  const fDesc = textareaRow('Описание задачи', isEdit ? stripHtml(item.description) : '');
 
   body.appendChild(metaLine(`Сотрудник: ${u.name || ('ID ' + u.id)}`));
+  if (isSlot) {
+    body.appendChild(metaLine('Ячейка — запланированная работа над задачей. Время и повторение меняются ' +
+      'только у этой ячейки (серии), сама задача в Битрикс24 одна.'));
+  }
   body.appendChild(fTitle.row);
   body.appendChild(fStart.row);
   body.appendChild(fEnd.row);
-  body.appendChild(fHours.row);
 
-  // Повторение — только при создании: каждое повторение станет отдельной задачей.
-  let fRepeat;
-  if (!isEdit) {
-    fRepeat = recurrenceField(fStart.input, fEnd.input, 'task');
+  let fRepeat = null;
+  if (seriesRuleUnsupported) {
+    fStart.input.disabled = true; fEnd.input.disabled = true;
+    body.appendChild(metaLine(`🔁 ${item.recurrenceLabel}. Это правило повторения меняйте в календаре Битрикс24.`));
+  } else {
+    fRepeat = recurrenceField(fStart.input, fEnd.input, series ? series.rule : null);
     body.appendChild(fRepeat.row);
   }
+  body.appendChild(fHours.row);
 
   let fStatus;
   if (isEdit) {
@@ -161,7 +200,22 @@ export function openTaskForm({ mode, user, start, end, item }) {
   }
   body.appendChild(fDesc.row);
 
-  const modal = openModal({ title: isEdit ? 'Редактирование задачи' : 'Создать задачу', bodyEl: body });
+  const title = isEdit ? (isSlot ? 'Работа над задачей' : 'Редактирование задачи') : 'Создать задачу';
+  const modal = openModal({ title, bodyEl: body });
+
+  const extra = [];
+  if (isSlot) {
+    extra.push([item.recurring ? 'Убрать серию из планировщика' : 'Убрать из планировщика', async () => {
+      const q = item.recurring
+        ? 'Убрать все повторения этой работы из планировщика? Задача в Битрикс24 останется.'
+        : 'Убрать ячейку из планировщика? Задача в Битрикс24 останется.';
+      if (!window.confirm(q)) return false;
+      await deleteCalendarEvent(item.slot.eventId, item.slot.ownerId);
+      showToast('Ячейка убрана из планировщика', 'success');
+      return true;
+    }]);
+  }
+
   addFooter(body, modal, async () => {
     const payload = {
       title: fTitle.input.value.trim(),
@@ -172,20 +226,40 @@ export function openTaskForm({ mode, user, start, end, item }) {
     };
     if (!payload.title) throw new Error('Укажите название задачи');
     if (!(payload.end > payload.start)) throw new Error('Окончание должно быть позже начала');
+    const rule = fRepeat ? fRepeat.getRule() : undefined;
+    if (rule) validateRule(rule, payload.start);
+    const status = fStatus ? Number(fStatus.input.value) : undefined;
 
-    if (isEdit) {
-      await updateTask(item.rawId, { ...payload, status: fStatus ? Number(fStatus.input.value) : undefined });
+    if (isSlot) {
+      // Поля задачи — в задачу (без дат), время и повторение — в слот.
+      await updateTask(item.rawId, { title: payload.title, description: payload.description,
+        hoursPlan: payload.hoursPlan, status });
+      const slotChange = { title: payload.title };
+      if (!seriesRuleUnsupported) {
+        slotChange.start = payload.start;
+        slotChange.end = payload.end;
+        // Правило отправляем, если серия была или появилась.
+        if (item.recurring || isRecurring(rule)) slotChange.rule = rule;
+      }
+      await updateTaskSlot(item.slot.eventId, item.slot.ownerId, slotChange);
       showToast('Задача обновлена', 'success');
+    } else if (isEdit) {
+      if (isRecurring(rule)) {
+        // Обычная задача становится повторяющейся: плановые даты — первое
+        // вхождение, повторения — серией слотов в календаре.
+        await updateTask(item.rawId, { ...payload, status, withDeadline: false });
+        await createTaskSlot({ taskId: item.rawId, title: payload.title, userId: u.id,
+          start: payload.start, end: payload.end, rule });
+        showToast('Задача обновлена, повторения запланированы', 'success');
+      } else {
+        await updateTask(item.rawId, { ...payload, status });
+        showToast('Задача обновлена', 'success');
+      }
     } else {
-      const rule = fRepeat.getRule();
-      validateRule(rule, payload.start);
-      const { created, failed } = await createTaskSeries({ ...payload, userId: u.id }, rule);
-      if (!isRecurring(rule)) showToast('Задача создана', 'success');
-      else if (failed === 0) showToast(`Создано повторяющихся задач: ${created}`, 'success');
-      else if (created > 0) showToast(`Создано задач: ${created}, не удалось: ${failed}`, 'error');
-      else throw new Error('Не удалось создать задачи серии');
+      await createTaskWithSchedule({ ...payload, userId: u.id }, rule);
+      showToast(isRecurring(rule) ? 'Задача создана, повторения запланированы' : 'Задача создана', 'success');
     }
-  });
+  }, extra);
 }
 
 function statusOptions() {
@@ -197,38 +271,49 @@ function statusOptions() {
   ];
 }
 
+
 // --- Форма встречи / отсутствия -------------------------------------------
 
-export function openEventForm({ mode, kind, user, start, end, item }) {
-  const body = document.createElement('div');
-  body.className = 'modal__body';
-
+export async function openEventForm({ mode, kind, user, start, end, item }) {
   const isEdit = mode === 'edit';
   const realKind = isEdit ? item.kind : kind;
   const u = user || selectedUsers().find((x) => x.id === item.userId) || { id: item && item.userId, name: '' };
   const isAbsence = realKind === 'absence';
 
+  // Повторяющееся событие правится серией: берём её начало и правило.
+  let series = null;
+  if (isEdit && item.recurring) {
+    try {
+      series = await loadEventSeries(item.rawId);
+    } catch (e) { showError(e); return; }
+  }
+  const seriesRuleUnsupported = !!series && !series.rule;
+
+  const body = document.createElement('div');
+  body.className = 'modal__body';
+
+  const startVal = series ? series.start : (isEdit ? item.start : start);
+  const endVal = series ? series.end : (isEdit ? item.end : end);
+
   const fName = inputRow(isAbsence ? 'Причина отсутствия *' : 'Название встречи *', 'text', isEdit ? item.title : '');
-  const fStart = inputRow('Начало', 'datetime-local', toDateTimeInputValue(isEdit ? item.start : start));
-  const fEnd = inputRow('Окончание', 'datetime-local', toDateTimeInputValue(isEdit ? item.end : end));
+  const fStart = inputRow(series ? 'Начало серии' : 'Начало', 'datetime-local', toDateTimeInputValue(startVal));
+  const fEnd = inputRow(series ? 'Окончание (первое вхождение)' : 'Окончание', 'datetime-local', toDateTimeInputValue(endVal));
   const fDesc = textareaRow('Описание', isEdit ? stripHtml(item.description) : '');
 
   body.appendChild(metaLine(`Сотрудник: ${u.name || ('ID ' + u.id)}`));
+  if (series) {
+    body.appendChild(metaLine('🔁 Событие повторяется — изменения применятся ко всей серии.'));
+  }
   body.appendChild(fName.row);
   body.appendChild(fStart.row);
   body.appendChild(fEnd.row);
 
-  // Повторяющиеся события правит календарь Битрикс24 целиком (вся серия),
-  // поэтому время серии здесь не меняем — только название и описание.
-  const seriesEdit = isEdit && item.recurring;
-  let fRepeat;
-  if (seriesEdit) {
-    fStart.input.disabled = true;
-    fEnd.input.disabled = true;
-    body.appendChild(metaLine(`🔁 ${item.recurrenceLabel || 'Повторяется'}. Изменения применятся ко всей серии; ` +
-      'время и правило повторения меняйте в календаре Битрикс24.'));
-  } else if (!isEdit) {
-    fRepeat = recurrenceField(fStart.input, fEnd.input, realKind);
+  let fRepeat = null;
+  if (seriesRuleUnsupported) {
+    fStart.input.disabled = true; fEnd.input.disabled = true;
+    body.appendChild(metaLine(`${item.recurrenceLabel}. Время и это правило повторения меняйте в календаре Битрикс24.`));
+  } else {
+    fRepeat = recurrenceField(fStart.input, fEnd.input, series ? series.rule : null);
     body.appendChild(fRepeat.row);
   }
   body.appendChild(fDesc.row);
@@ -244,16 +329,19 @@ export function openEventForm({ mode, kind, user, start, end, item }) {
     const e = new Date(fEnd.input.value);
     if (!name) throw new Error('Укажите название');
     if (!(e > s)) throw new Error('Окончание должно быть позже начала');
+    const rule = fRepeat ? fRepeat.getRule() : undefined;
+    if (rule) validateRule(rule, s);
 
-    if (seriesEdit) {
-      await updateEvent(item.rawId, u.id, { name, description: fDesc.input.value, kind: realKind });
-      showToast(isAbsence ? 'Серия отсутствий обновлена' : 'Серия встреч обновлена', 'success');
-    } else if (isEdit) {
-      await updateEvent(item.rawId, u.id, { name, description: fDesc.input.value, start: s, end: e, kind: realKind });
+    if (isEdit) {
+      const change = { name, description: fDesc.input.value, kind: realKind };
+      if (!seriesRuleUnsupported) {
+        change.start = s;
+        change.end = e;
+        if (item.recurring || isRecurring(rule)) change.rule = rule;
+      }
+      await updateEvent(item.rawId, u.id, change);
       showToast(isAbsence ? 'Отсутствие обновлено' : 'Встреча обновлена', 'success');
     } else {
-      const rule = fRepeat.getRule();
-      validateRule(rule, s);
       await createEvent({ name, userId: u.id, description: fDesc.input.value, start: s, end: e, kind: realKind, rule });
       const suffix = isRecurring(rule) ? ' (повторяющееся)' : '';
       showToast((isAbsence ? 'Отсутствие добавлено' : 'Встреча создана') + suffix, 'success');
@@ -270,13 +358,15 @@ export function openEditModal(item) {
 
 // --- Блок «Повторение» ----------------------------------------------------
 // startInput/endInput — поля начала и окончания формы (для подсказки и дня
-// недели по умолчанию). kind — 'task' | 'event' | 'absence'.
+// недели по умолчанию). initial — правило для предзаполнения (или null).
 
-function recurrenceField(startInput, endInput, kind) {
+function recurrenceField(startInput, endInput, initial) {
+  const init = initial || { freq: 'none', interval: 1, byDay: [], endMode: 'never', count: 10, until: null };
+
   const row = document.createElement('div');
   row.className = 'form__row recur';
 
-  const fFreq = selectRow('Повторение', RECUR_FREQS, 'none');
+  const fFreq = selectRow('Повторение', RECUR_FREQS, init.freq);
   fFreq.row.classList.add('recur__freq');
   row.appendChild(fFreq.row);
 
@@ -285,7 +375,7 @@ function recurrenceField(startInput, endInput, kind) {
   row.appendChild(details);
 
   // «Каждые N …»
-  const fInterval = inputRow('Каждые', 'number', '1');
+  const fInterval = inputRow('Каждые', 'number', String(init.interval || 1));
   fInterval.input.min = '1'; fInterval.input.max = '99'; fInterval.input.step = '1';
   const intervalUnit = document.createElement('span');
   intervalUnit.className = 'recur__unit';
@@ -307,6 +397,7 @@ function recurrenceField(startInput, endInput, kind) {
     const cb = document.createElement('input');
     cb.type = 'checkbox';
     cb.value = code;
+    cb.checked = (init.byDay || []).includes(code);
     chip.appendChild(cb);
     chip.appendChild(document.createTextNode(label));
     daysRow.appendChild(chip);
@@ -314,20 +405,20 @@ function recurrenceField(startInput, endInput, kind) {
   }
   details.appendChild(daysRow);
 
-  // Окончание серии: после N раз или до даты.
-  const fEndMode = selectRow('Завершить', [['count', 'После количества повторений'], ['until', 'В указанную дату']], 'count');
+  // Окончание серии: никогда, после N раз или в дату.
+  const fEndMode = selectRow('Завершить', RECUR_END_MODES, init.endMode || 'never');
   details.appendChild(fEndMode.row);
-  const fCount = inputRow('Количество повторений (вместе с первым)', 'number', '10');
+  const fCount = inputRow('Количество повторений (вместе с первым)', 'number', String(init.count || 10));
   fCount.input.min = '2'; fCount.input.step = '1';
   details.appendChild(fCount.row);
-  const fUntil = inputRow('Повторять до (включительно)', 'date', '');
+  const fUntil = inputRow('Повторять до (включительно)', 'date', init.until ? toDateInputValue(init.until) : '');
   details.appendChild(fUntil.row);
 
   const summary = document.createElement('div');
   summary.className = 'form__meta recur__summary';
   details.appendChild(summary);
 
-  let daysTouched = false;
+  let daysTouched = (init.byDay || []).length > 0;
   for (const cb of dayBoxes.values()) cb.addEventListener('change', () => { daysTouched = true; refresh(); });
 
   function getRule() {
@@ -362,18 +453,11 @@ function recurrenceField(startInput, endInput, kind) {
     }
 
     if (freq === 'none') return;
-    const rule = getRule();
     try {
       if (isNaN(start) || !(end > start)) throw new Error('Укажите начало и окончание');
+      const rule = getRule();
       validateRule(rule, start);
-      let text = describeRule(rule);
-      if (kind === 'task') {
-        const total = countOccurrences(rule, start, end);
-        const n = Math.min(total, RECUR_MAX_TASKS);
-        text += `. Будет создано задач: ${n}`;
-        if (total > RECUR_MAX_TASKS) text += ` (ограничение — не более ${RECUR_MAX_TASKS})`;
-      }
-      summary.textContent = '🔁 ' + text;
+      summary.textContent = '🔁 ' + describeRule(rule);
       summary.classList.remove('recur__summary--error');
     } catch (e) {
       summary.textContent = e.message;
@@ -392,9 +476,27 @@ function recurrenceField(startInput, endInput, kind) {
 
 // --- Общие элементы формы -------------------------------------------------
 
-function addFooter(body, modal, onSubmit) {
+// extra — дополнительные кнопки слева: [[текст, async () => закрыть?], ...].
+function addFooter(body, modal, onSubmit, extra = []) {
   const footer = document.createElement('div');
   footer.className = 'modal__footer';
+  for (const [label, fn] of extra) {
+    const btn = document.createElement('button');
+    btn.className = 'btn btn--danger';
+    btn.textContent = label;
+    btn.addEventListener('click', async () => {
+      btn.disabled = true;
+      try {
+        if (await fn()) {
+          modal.destroy();
+          await bus.reloadWeek();
+          return;
+        }
+      } catch (e) { showError(e); }
+      btn.disabled = false;
+    });
+    footer.appendChild(btn);
+  }
   const cancel = document.createElement('button');
   cancel.className = 'btn btn--ghost';
   cancel.textContent = 'Отмена';
