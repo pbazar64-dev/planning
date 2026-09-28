@@ -227,7 +227,8 @@ function buildBlock(g) {
     content.appendChild(meta);
   } else {
     const meta = el('div', 'cal-block__meta');
-    meta.textContent = item.allDay ? 'весь день' : `${formatTime(item.start)}–${formatTime(item.end)}`;
+    meta.textContent = (item.recurring ? '🔁 ' : '') +
+      (item.allDay ? 'весь день' : `${formatTime(item.start)}–${formatTime(item.end)}`);
     content.appendChild(meta);
   }
   block.appendChild(content);

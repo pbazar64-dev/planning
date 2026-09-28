@@ -14,6 +14,7 @@ const r = (p) => readFileSync(resolve(root, p), 'utf8');
 const MODULE_ORDER = [
   'js/config.js',
   'js/dates.js',
+  'js/recurrence.js',
   'js/state.js',
   'js/bus.js',
   'js/b24.js',

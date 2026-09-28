@@ -295,6 +295,23 @@ body.is-loading .app-header__progress {
 }
 .form__loading { padding: 20px; text-align: center; color: var(--c-muted); }
 
+/* Повторение */
+.recur [hidden] { display: none !important; }
+.recur__details { margin-top: 8px; padding: 10px 12px; border: 1px dashed var(--c-line); border-radius: 8px; }
+.recur__interval { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.recur__interval .form__label { width: 100%; }
+.recur__interval .form__input { width: 90px; }
+.recur__unit { font-size: 13px; color: var(--c-muted); }
+.recur__days { display: flex; flex-wrap: wrap; gap: 6px; }
+.recur__days .form__label { width: 100%; }
+.recur__day {
+  display: inline-flex; align-items: center; gap: 4px; cursor: pointer;
+  border: 1px solid var(--c-line); border-radius: 16px; padding: 4px 10px; font-size: 13px;
+}
+.recur__day:has(input:checked) { background: #F0F7FF; border-color: var(--c-primary); }
+.recur__summary { margin: 0; }
+.recur__summary--error { color: #C62828; background: #FFEBEE; }
+
 /* Меню слота */
 .slot-menu { display: flex; flex-direction: column; gap: 8px; }
 .slot-menu__hint { font-size: 12px; color: var(--c-muted); margin-bottom: 4px; }
@@ -552,6 +569,194 @@ function weekRangeB24(date) {
   };
 }
 
+
+
+// ===== js/recurrence.js =====
+// Правила повторения для задач, встреч и отсутствий.
+//
+// Правило (rule):
+//   { freq: 'none'|'workdays'|'daily'|'weekly'|'monthly',
+//     interval: number,          // «каждые N» дней/недель/месяцев
+//     byDay: ['MO', 'WE', ...],  // дни недели для weekly
+//     endMode: 'count'|'until',
+//     count: number,             // сколько раз всего (вместе с первым)
+//     until: Date|null }         // последний день серии (включительно)
+//
+// Встречи и отсутствия повторяются средствами календаря Битрикс24 (rrule),
+// задачи — создаются отдельной задачей на каждое повторение.
+
+
+// Предел числа повторений для задач (каждая — отдельный tasks.task.add).
+const RECUR_MAX_TASKS = 100;
+// Предел горизонта разворачивания серии — 3 года.
+const RECUR_HORIZON_DAYS = 366 * 3;
+
+const RECUR_FREQS = [
+  ['none', 'Не повторять'],
+  ['workdays', 'Каждый рабочий день (ПН–ПТ)'],
+  ['daily', 'Ежедневно'],
+  ['weekly', 'Еженедельно'],
+  ['monthly', 'Ежемесячно'],
+];
+
+// Коды дней недели в порядке ПН..ВС и соответствие Date.getDay().
+const RECUR_WEEKDAYS = [
+  ['MO', 'ПН'], ['TU', 'ВТ'], ['WE', 'СР'], ['TH', 'ЧТ'], ['FR', 'ПТ'], ['SA', 'СБ'], ['SU', 'ВС'],
+];
+const RECUR_DAY_BY_JS = ['SU', 'MO', 'TU', 'WE', 'TH', 'FR', 'SA'];
+
+function weekdayCode(date) {
+  return RECUR_DAY_BY_JS[new Date(date).getDay()];
+}
+
+function isRecurring(rule) {
+  return !!rule && rule.freq && rule.freq !== 'none';
+}
+
+// Проверка правила перед сохранением. Бросает Error с понятным текстом.
+function validateRule(rule, start) {
+  if (!isRecurring(rule)) return;
+  if (!(rule.interval >= 1)) throw new Error('Интервал повторения должен быть не меньше 1');
+  if (rule.freq === 'weekly' && (!rule.byDay || rule.byDay.length === 0)) {
+    throw new Error('Выберите хотя бы один день недели для повторения');
+  }
+  if (rule.endMode === 'count') {
+    if (!(rule.count >= 2)) throw new Error('Количество повторений должно быть не меньше 2');
+  } else {
+    if (!rule.until || isNaN(rule.until)) throw new Error('Укажите дату окончания повторений');
+    if (startOfDay(rule.until) < startOfDay(start)) {
+      throw new Error('Дата окончания повторений раньше начала');
+    }
+  }
+}
+
+// Параметр rrule для calendar.event.add.
+function toB24RRule(rule) {
+  const r = { INTERVAL: rule.interval || 1 };
+  switch (rule.freq) {
+    case 'workdays':
+      r.FREQ = 'WEEKLY';
+      r.INTERVAL = 1;
+      r.BYDAY = ['MO', 'TU', 'WE', 'TH', 'FR'];
+      break;
+    case 'daily': r.FREQ = 'DAILY'; break;
+    case 'weekly': r.FREQ = 'WEEKLY'; r.BYDAY = [...rule.byDay]; break;
+    case 'monthly': r.FREQ = 'MONTHLY'; break;
+    default: return null;
+  }
+  if (rule.endMode === 'count') r.COUNT = rule.count;
+  else r.UNTIL = toDateInputValue(rule.until);
+  return r;
+}
+
+// Разворачивает серию в список интервалов { start, end } (первый — исходный).
+// limit — предел количества (для задач).
+function expandOccurrences(rule, start, end, limit = RECUR_MAX_TASKS) {
+  const duration = end - start;
+  if (!isRecurring(rule)) return [{ start: new Date(start), end: new Date(end) }];
+
+  const first = startOfDay(start);
+  const firstWeek = startOfWeek(start);
+  const until = rule.endMode === 'until' ? startOfDay(rule.until) : null;
+  const maxCount = rule.endMode === 'count' ? Math.min(rule.count, limit) : limit;
+  const interval = rule.interval || 1;
+
+  const out = [];
+  for (let i = 0; i <= RECUR_HORIZON_DAYS && out.length < maxCount; i++) {
+    const day = addDays(first, i);
+    if (until && day > until) break;
+    if (!matchesDay(rule, interval, day, first, firstWeek)) continue;
+    const s = new Date(day);
+    s.setHours(start.getHours(), start.getMinutes(), 0, 0);
+    out.push({ start: s, end: new Date(s.getTime() + duration) });
+  }
+  return out;
+}
+
+// Сколько повторений даст правило без учёта предела (для подсказки).
+function countOccurrences(rule, start, end) {
+  return expandOccurrences(rule, start, end, Infinity).length;
+}
+
+function matchesDay(rule, interval, day, first, firstWeek) {
+  const dow = day.getDay();
+  switch (rule.freq) {
+    case 'workdays':
+      return dow >= 1 && dow <= 5;
+    case 'daily':
+      return diffDays(first, day) % interval === 0;
+    case 'weekly': {
+      if (!rule.byDay.includes(RECUR_DAY_BY_JS[dow])) return false;
+      const weeks = Math.floor(diffDays(firstWeek, startOfWeek(day)) / 7);
+      return weeks % interval === 0;
+    }
+    case 'monthly': {
+      if (day.getDate() !== first.getDate()) return false;
+      const months = (day.getFullYear() - first.getFullYear()) * 12 + day.getMonth() - first.getMonth();
+      return months % interval === 0;
+    }
+    default:
+      return false;
+  }
+}
+
+// Разница в календарных днях (устойчива к переходу на летнее время).
+function diffDays(a, b) {
+  return Math.round((startOfDay(b) - startOfDay(a)) / (24 * 60 * 60 * 1000));
+}
+
+// Человекочитаемое описание: «еженедельно по ПН, СР, 10 раз».
+function describeRule(rule) {
+  if (!isRecurring(rule)) return 'Не повторяется';
+  const n = rule.interval || 1;
+  let s;
+  switch (rule.freq) {
+    case 'workdays': s = 'каждый рабочий день'; break;
+    case 'daily': s = n > 1 ? `каждые ${n} дн.` : 'ежедневно'; break;
+    case 'weekly': {
+      const days = RECUR_WEEKDAYS.filter(([c]) => rule.byDay.includes(c)).map(([, l]) => l).join(', ');
+      s = (n > 1 ? `каждые ${n} нед.` : 'еженедельно') + ` по ${days}`;
+      break;
+    }
+    case 'monthly': s = n > 1 ? `каждые ${n} мес.` : 'ежемесячно'; break;
+    default: s = '';
+  }
+  s += rule.endMode === 'count' ? `, ${rule.count} раз` : `, до ${formatDateRu(rule.until)}`;
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+// Описание rrule, пришедшего из календаря Битрикс24 (строка или объект).
+function describeB24RRule(rr) {
+  if (!rr) return '';
+  const obj = typeof rr === 'string' ? parseRRuleString(rr) : rr;
+  const freq = String(obj.FREQ || '').toUpperCase();
+  const n = Number(obj.INTERVAL) || 1;
+  const labels = {
+    DAILY: n > 1 ? `каждые ${n} дн.` : 'ежедневно',
+    WEEKLY: n > 1 ? `каждые ${n} нед.` : 'еженедельно',
+    MONTHLY: n > 1 ? `каждые ${n} мес.` : 'ежемесячно',
+    YEARLY: n > 1 ? `каждые ${n} г.` : 'ежегодно',
+  };
+  let s = labels[freq] || 'повторяется';
+  let byDay = obj.BYDAY;
+  if (byDay && !Array.isArray(byDay)) byDay = typeof byDay === 'object' ? Object.values(byDay) : String(byDay).split(',');
+  if (freq === 'WEEKLY' && byDay && byDay.length) {
+    const days = RECUR_WEEKDAYS.filter(([c]) => byDay.includes(c)).map(([, l]) => l).join(', ');
+    if (days) s += ` по ${days}`;
+  }
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+// «FREQ=WEEKLY;INTERVAL=1;BYDAY=MO,WE» -> { FREQ, INTERVAL, BYDAY: [...] }
+function parseRRuleString(str) {
+  const out = {};
+  for (const part of String(str).split(';')) {
+    const [k, v] = part.split('=');
+    if (!k || v == null) continue;
+    out[k.trim().toUpperCase()] = k.trim().toUpperCase() === 'BYDAY' ? v.split(',') : v;
+  }
+  return out;
+}
 
 
 // ===== js/state.js =====
@@ -1077,9 +1282,12 @@ function mapEvent(e, userId) {
   const accessibility = (e.ACCESSIBILITY || e.accessibility || '').toLowerCase();
   const isAbsence = accessibility === 'absent';
   const skipTime = (e.SKIP_TIME || e.skipTime) === 'Y';
+  // Повторяющиеся события приходят отдельными вхождениями с общим ID серии.
+  const rrule = e.RRULE || e.rrule || '';
+  const recurring = !!rrule && (typeof rrule !== 'object' || Object.keys(rrule).length > 0);
 
   return {
-    id: (isAbsence ? 'absence_' : 'event_') + (e.ID || e.id),
+    id: (isAbsence ? 'absence_' : 'event_') + (e.ID || e.id) + (recurring ? '_' + start.getTime() : ''),
     rawId: String(e.ID || e.id),
     kind: isAbsence ? 'absence' : 'event',
     userId,
@@ -1089,6 +1297,8 @@ function mapEvent(e, userId) {
     allDay: skipTime,
     status: null,
     hoursPlan: 0, hoursFact: 0, hoursToday: 0,
+    recurring,
+    recurrenceLabel: recurring ? describeB24RRule(rrule) : '',
     raw: e,
   };
 }
@@ -1142,6 +1352,10 @@ async function enrichTodayLogged(byUser) {
 // --- Создание и обновление сущностей --------------------------------------
 
 async function createTask({ title, userId, description, start, end, hoursPlan }) {
+  return callMethod('tasks.task.add', { fields: taskFields({ title, userId, description, start, end, hoursPlan }) });
+}
+
+function taskFields({ title, userId, description, start, end, hoursPlan }) {
   const fields = {
     TITLE: title,
     RESPONSIBLE_ID: userId,
@@ -1153,7 +1367,30 @@ async function createTask({ title, userId, description, start, end, hoursPlan })
     fields.DEADLINE = toB24DateTime(end);
   }
   if (hoursPlan) fields.TIME_ESTIMATE = Math.round(Number(hoursPlan) * 3600);
-  return callMethod('tasks.task.add', { fields });
+  return fields;
+}
+
+// Серия повторяющихся задач: отдельная задача на каждое повторение,
+// создаются батчами по 50. Возвращает { created, failed }.
+async function createTaskSeries(payload, rule) {
+  if (!isRecurring(rule)) {
+    await createTask(payload);
+    return { created: 1, failed: 0 };
+  }
+  const occurrences = expandOccurrences(rule, payload.start, payload.end);
+  let created = 0;
+  for (let i = 0; i < occurrences.length; i += 50) {
+    const calls = {};
+    occurrences.slice(i, i + 50).forEach((o, j) => {
+      calls['t_' + (i + j)] = {
+        method: 'tasks.task.add',
+        params: { fields: taskFields({ ...payload, start: o.start, end: o.end }) },
+      };
+    });
+    const results = await callBatch(calls);
+    created += Object.values(results).filter((r) => r != null).length;
+  }
+  return { created, failed: occurrences.length - created };
 }
 
 async function updateTask(rawId, { title, description, start, end, hoursPlan, status }) {
@@ -1194,8 +1431,8 @@ async function loadUserTasksForPick(userId) {
   }));
 }
 
-async function createEvent({ name, userId, description, start, end, kind }) {
-  return callMethod('calendar.event.add', {
+async function createEvent({ name, userId, description, start, end, kind, rule }) {
+  const params = {
     type: 'user',
     ownerId: userId,
     from: toB24DateTime(start),
@@ -1203,7 +1440,10 @@ async function createEvent({ name, userId, description, start, end, kind }) {
     name,
     description: description || '',
     accessibility: kind === 'absence' ? 'absent' : 'busy',
-  });
+  };
+  // Повторение встреч и отсутствий — штатными средствами календаря.
+  if (isRecurring(rule)) params.rrule = toB24RRule(rule);
+  return callMethod('calendar.event.add', params);
 }
 
 async function updateEvent(rawId, userId, { name, description, start, end, kind }) {
@@ -1279,6 +1519,9 @@ function buildHtml(item) {
     ? 'весь день'
     : `${formatTime(item.start)}–${formatTime(item.end)}`;
   rows.push(`<div class="tooltip__row"><b>Время:</b> ${timeStr}</div>`);
+  if (item.recurring) {
+    rows.push(`<div class="tooltip__row"><b>Повтор:</b> 🔁 ${escapeHtml(item.recurrenceLabel || 'повторяется')}</div>`);
+  }
 
   if (item.kind === 'task') {
     rows.push(`<div class="tooltip__row"><b>Часы:</b> ` +
@@ -1463,6 +1706,13 @@ function openTaskForm({ mode, user, start, end, item }) {
   body.appendChild(fEnd.row);
   body.appendChild(fHours.row);
 
+  // Повторение — только при создании: каждое повторение станет отдельной задачей.
+  let fRepeat;
+  if (!isEdit) {
+    fRepeat = recurrenceField(fStart.input, fEnd.input, 'task');
+    body.appendChild(fRepeat.row);
+  }
+
   let fStatus;
   if (isEdit) {
     fStatus = selectRow('Статус', statusOptions(), String(item.status ? item.status.code : 2));
@@ -1486,8 +1736,13 @@ function openTaskForm({ mode, user, start, end, item }) {
       await updateTask(item.rawId, { ...payload, status: fStatus ? Number(fStatus.input.value) : undefined });
       showToast('Задача обновлена', 'success');
     } else {
-      await createTask({ ...payload, userId: u.id });
-      showToast('Задача создана', 'success');
+      const rule = fRepeat.getRule();
+      validateRule(rule, payload.start);
+      const { created, failed } = await createTaskSeries({ ...payload, userId: u.id }, rule);
+      if (!isRecurring(rule)) showToast('Задача создана', 'success');
+      else if (failed === 0) showToast(`Создано повторяющихся задач: ${created}`, 'success');
+      else if (created > 0) showToast(`Создано задач: ${created}, не удалось: ${failed}`, 'error');
+      else throw new Error('Не удалось создать задачи серии');
     }
   });
 }
@@ -1521,6 +1776,20 @@ function openEventForm({ mode, kind, user, start, end, item }) {
   body.appendChild(fName.row);
   body.appendChild(fStart.row);
   body.appendChild(fEnd.row);
+
+  // Повторяющиеся события правит календарь Битрикс24 целиком (вся серия),
+  // поэтому время серии здесь не меняем — только название и описание.
+  const seriesEdit = isEdit && item.recurring;
+  let fRepeat;
+  if (seriesEdit) {
+    fStart.input.disabled = true;
+    fEnd.input.disabled = true;
+    body.appendChild(metaLine(`🔁 ${item.recurrenceLabel || 'Повторяется'}. Изменения применятся ко всей серии; ` +
+      'время и правило повторения меняйте в календаре Битрикс24.'));
+  } else if (!isEdit) {
+    fRepeat = recurrenceField(fStart.input, fEnd.input, realKind);
+    body.appendChild(fRepeat.row);
+  }
   body.appendChild(fDesc.row);
 
   const title = isAbsence
@@ -1535,12 +1804,18 @@ function openEventForm({ mode, kind, user, start, end, item }) {
     if (!name) throw new Error('Укажите название');
     if (!(e > s)) throw new Error('Окончание должно быть позже начала');
 
-    if (isEdit) {
+    if (seriesEdit) {
+      await updateEvent(item.rawId, u.id, { name, description: fDesc.input.value, kind: realKind });
+      showToast(isAbsence ? 'Серия отсутствий обновлена' : 'Серия встреч обновлена', 'success');
+    } else if (isEdit) {
       await updateEvent(item.rawId, u.id, { name, description: fDesc.input.value, start: s, end: e, kind: realKind });
       showToast(isAbsence ? 'Отсутствие обновлено' : 'Встреча обновлена', 'success');
     } else {
-      await createEvent({ name, userId: u.id, description: fDesc.input.value, start: s, end: e, kind: realKind });
-      showToast(isAbsence ? 'Отсутствие добавлено' : 'Встреча создана', 'success');
+      const rule = fRepeat.getRule();
+      validateRule(rule, s);
+      await createEvent({ name, userId: u.id, description: fDesc.input.value, start: s, end: e, kind: realKind, rule });
+      const suffix = isRecurring(rule) ? ' (повторяющееся)' : '';
+      showToast((isAbsence ? 'Отсутствие добавлено' : 'Встреча создана') + suffix, 'success');
     }
   });
 }
@@ -1550,6 +1825,128 @@ function openEventForm({ mode, kind, user, start, end, item }) {
 function openEditModal(item) {
   if (item.kind === 'task') openTaskForm({ mode: 'edit', item });
   else openEventForm({ mode: 'edit', item });
+}
+
+// --- Блок «Повторение» ----------------------------------------------------
+// startInput/endInput — поля начала и окончания формы (для подсказки и дня
+// недели по умолчанию). kind — 'task' | 'event' | 'absence'.
+
+function recurrenceField(startInput, endInput, kind) {
+  const row = document.createElement('div');
+  row.className = 'form__row recur';
+
+  const fFreq = selectRow('Повторение', RECUR_FREQS, 'none');
+  fFreq.row.classList.add('recur__freq');
+  row.appendChild(fFreq.row);
+
+  const details = document.createElement('div');
+  details.className = 'recur__details';
+  row.appendChild(details);
+
+  // «Каждые N …»
+  const fInterval = inputRow('Каждые', 'number', '1');
+  fInterval.input.min = '1'; fInterval.input.max = '99'; fInterval.input.step = '1';
+  const intervalUnit = document.createElement('span');
+  intervalUnit.className = 'recur__unit';
+  fInterval.row.classList.add('recur__interval');
+  fInterval.row.appendChild(intervalUnit);
+  details.appendChild(fInterval.row);
+
+  // Дни недели для «Еженедельно».
+  const daysRow = document.createElement('div');
+  daysRow.className = 'form__row recur__days';
+  const daysLabel = document.createElement('span');
+  daysLabel.className = 'form__label';
+  daysLabel.textContent = 'По дням';
+  daysRow.appendChild(daysLabel);
+  const dayBoxes = new Map();
+  for (const [code, label] of RECUR_WEEKDAYS) {
+    const chip = document.createElement('label');
+    chip.className = 'recur__day';
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.value = code;
+    chip.appendChild(cb);
+    chip.appendChild(document.createTextNode(label));
+    daysRow.appendChild(chip);
+    dayBoxes.set(code, cb);
+  }
+  details.appendChild(daysRow);
+
+  // Окончание серии: после N раз или до даты.
+  const fEndMode = selectRow('Завершить', [['count', 'После количества повторений'], ['until', 'В указанную дату']], 'count');
+  details.appendChild(fEndMode.row);
+  const fCount = inputRow('Количество повторений (вместе с первым)', 'number', '10');
+  fCount.input.min = '2'; fCount.input.step = '1';
+  details.appendChild(fCount.row);
+  const fUntil = inputRow('Повторять до (включительно)', 'date', '');
+  details.appendChild(fUntil.row);
+
+  const summary = document.createElement('div');
+  summary.className = 'form__meta recur__summary';
+  details.appendChild(summary);
+
+  let daysTouched = false;
+  for (const cb of dayBoxes.values()) cb.addEventListener('change', () => { daysTouched = true; refresh(); });
+
+  function getRule() {
+    return {
+      freq: fFreq.input.value,
+      interval: Math.floor(Number(fInterval.input.value)) || 0,
+      byDay: [...dayBoxes.values()].filter((cb) => cb.checked).map((cb) => cb.value),
+      endMode: fEndMode.input.value,
+      count: Math.floor(Number(fCount.input.value)) || 0,
+      until: fUntil.input.value ? new Date(fUntil.input.value + 'T00:00') : null,
+    };
+  }
+
+  function refresh() {
+    const freq = fFreq.input.value;
+    const start = new Date(startInput.value);
+    const end = new Date(endInput.value);
+    details.hidden = freq === 'none';
+    fInterval.row.hidden = freq === 'workdays';
+    daysRow.hidden = freq !== 'weekly';
+    fCount.row.hidden = fEndMode.input.value !== 'count';
+    fUntil.row.hidden = fEndMode.input.value !== 'until';
+    intervalUnit.textContent = { daily: 'дн.', weekly: 'нед.', monthly: 'мес.' }[freq] || '';
+
+    // По умолчанию — день недели начала; дата окончания — через месяц.
+    if (!isNaN(start)) {
+      if (!daysTouched) {
+        const code = weekdayCode(start);
+        for (const [c, cb] of dayBoxes) cb.checked = c === code;
+      }
+      if (!fUntil.input.value) fUntil.input.value = toDateInputValue(addDays(start, 30));
+    }
+
+    if (freq === 'none') return;
+    const rule = getRule();
+    try {
+      if (isNaN(start) || !(end > start)) throw new Error('Укажите начало и окончание');
+      validateRule(rule, start);
+      let text = describeRule(rule);
+      if (kind === 'task') {
+        const total = countOccurrences(rule, start, end);
+        const n = Math.min(total, RECUR_MAX_TASKS);
+        text += `. Будет создано задач: ${n}`;
+        if (total > RECUR_MAX_TASKS) text += ` (ограничение — не более ${RECUR_MAX_TASKS})`;
+      }
+      summary.textContent = '🔁 ' + text;
+      summary.classList.remove('recur__summary--error');
+    } catch (e) {
+      summary.textContent = e.message;
+      summary.classList.add('recur__summary--error');
+    }
+  }
+
+  for (const inp of [fFreq.input, fInterval.input, fEndMode.input, fCount.input, fUntil.input, startInput, endInput]) {
+    inp.addEventListener('input', refresh);
+    inp.addEventListener('change', refresh);
+  }
+  refresh();
+
+  return { row, getRule };
 }
 
 // --- Общие элементы формы -------------------------------------------------
@@ -1861,7 +2258,8 @@ function buildBlock(g) {
     content.appendChild(meta);
   } else {
     const meta = el('div', 'cal-block__meta');
-    meta.textContent = item.allDay ? 'весь день' : `${formatTime(item.start)}–${formatTime(item.end)}`;
+    meta.textContent = (item.recurring ? '🔁 ' : '') +
+      (item.allDay ? 'весь день' : `${formatTime(item.start)}–${formatTime(item.end)}`);
     content.appendChild(meta);
   }
   block.appendChild(content);

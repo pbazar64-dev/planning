@@ -2,11 +2,15 @@
 // выбор существующей задачи для привязки к слоту.
 
 import {
-  createTask, updateTask, attachTaskToSlot, loadUserTasksForPick,
+  createTaskSeries, updateTask, attachTaskToSlot, loadUserTasksForPick,
   createEvent, updateEvent,
 } from '../data.js';
 import { TASK_STATUS } from '../config.js';
-import { toDateTimeInputValue, formatTime, formatDayLabel } from '../dates.js';
+import { toDateTimeInputValue, toDateInputValue, formatTime, formatDayLabel, addDays } from '../dates.js';
+import {
+  RECUR_FREQS, RECUR_WEEKDAYS, RECUR_MAX_TASKS, weekdayCode, isRecurring,
+  validateRule, describeRule, countOccurrences,
+} from '../recurrence.js';
 import { selectedUsers } from '../state.js';
 import { bus } from '../bus.js';
 import { showToast, showError } from './toast.js';
@@ -143,6 +147,13 @@ export function openTaskForm({ mode, user, start, end, item }) {
   body.appendChild(fEnd.row);
   body.appendChild(fHours.row);
 
+  // Повторение — только при создании: каждое повторение станет отдельной задачей.
+  let fRepeat;
+  if (!isEdit) {
+    fRepeat = recurrenceField(fStart.input, fEnd.input, 'task');
+    body.appendChild(fRepeat.row);
+  }
+
   let fStatus;
   if (isEdit) {
     fStatus = selectRow('Статус', statusOptions(), String(item.status ? item.status.code : 2));
@@ -166,8 +177,13 @@ export function openTaskForm({ mode, user, start, end, item }) {
       await updateTask(item.rawId, { ...payload, status: fStatus ? Number(fStatus.input.value) : undefined });
       showToast('Задача обновлена', 'success');
     } else {
-      await createTask({ ...payload, userId: u.id });
-      showToast('Задача создана', 'success');
+      const rule = fRepeat.getRule();
+      validateRule(rule, payload.start);
+      const { created, failed } = await createTaskSeries({ ...payload, userId: u.id }, rule);
+      if (!isRecurring(rule)) showToast('Задача создана', 'success');
+      else if (failed === 0) showToast(`Создано повторяющихся задач: ${created}`, 'success');
+      else if (created > 0) showToast(`Создано задач: ${created}, не удалось: ${failed}`, 'error');
+      else throw new Error('Не удалось создать задачи серии');
     }
   });
 }
@@ -201,6 +217,20 @@ export function openEventForm({ mode, kind, user, start, end, item }) {
   body.appendChild(fName.row);
   body.appendChild(fStart.row);
   body.appendChild(fEnd.row);
+
+  // Повторяющиеся события правит календарь Битрикс24 целиком (вся серия),
+  // поэтому время серии здесь не меняем — только название и описание.
+  const seriesEdit = isEdit && item.recurring;
+  let fRepeat;
+  if (seriesEdit) {
+    fStart.input.disabled = true;
+    fEnd.input.disabled = true;
+    body.appendChild(metaLine(`🔁 ${item.recurrenceLabel || 'Повторяется'}. Изменения применятся ко всей серии; ` +
+      'время и правило повторения меняйте в календаре Битрикс24.'));
+  } else if (!isEdit) {
+    fRepeat = recurrenceField(fStart.input, fEnd.input, realKind);
+    body.appendChild(fRepeat.row);
+  }
   body.appendChild(fDesc.row);
 
   const title = isAbsence
@@ -215,12 +245,18 @@ export function openEventForm({ mode, kind, user, start, end, item }) {
     if (!name) throw new Error('Укажите название');
     if (!(e > s)) throw new Error('Окончание должно быть позже начала');
 
-    if (isEdit) {
+    if (seriesEdit) {
+      await updateEvent(item.rawId, u.id, { name, description: fDesc.input.value, kind: realKind });
+      showToast(isAbsence ? 'Серия отсутствий обновлена' : 'Серия встреч обновлена', 'success');
+    } else if (isEdit) {
       await updateEvent(item.rawId, u.id, { name, description: fDesc.input.value, start: s, end: e, kind: realKind });
       showToast(isAbsence ? 'Отсутствие обновлено' : 'Встреча обновлена', 'success');
     } else {
-      await createEvent({ name, userId: u.id, description: fDesc.input.value, start: s, end: e, kind: realKind });
-      showToast(isAbsence ? 'Отсутствие добавлено' : 'Встреча создана', 'success');
+      const rule = fRepeat.getRule();
+      validateRule(rule, s);
+      await createEvent({ name, userId: u.id, description: fDesc.input.value, start: s, end: e, kind: realKind, rule });
+      const suffix = isRecurring(rule) ? ' (повторяющееся)' : '';
+      showToast((isAbsence ? 'Отсутствие добавлено' : 'Встреча создана') + suffix, 'success');
     }
   });
 }
@@ -230,6 +266,128 @@ export function openEventForm({ mode, kind, user, start, end, item }) {
 export function openEditModal(item) {
   if (item.kind === 'task') openTaskForm({ mode: 'edit', item });
   else openEventForm({ mode: 'edit', item });
+}
+
+// --- Блок «Повторение» ----------------------------------------------------
+// startInput/endInput — поля начала и окончания формы (для подсказки и дня
+// недели по умолчанию). kind — 'task' | 'event' | 'absence'.
+
+function recurrenceField(startInput, endInput, kind) {
+  const row = document.createElement('div');
+  row.className = 'form__row recur';
+
+  const fFreq = selectRow('Повторение', RECUR_FREQS, 'none');
+  fFreq.row.classList.add('recur__freq');
+  row.appendChild(fFreq.row);
+
+  const details = document.createElement('div');
+  details.className = 'recur__details';
+  row.appendChild(details);
+
+  // «Каждые N …»
+  const fInterval = inputRow('Каждые', 'number', '1');
+  fInterval.input.min = '1'; fInterval.input.max = '99'; fInterval.input.step = '1';
+  const intervalUnit = document.createElement('span');
+  intervalUnit.className = 'recur__unit';
+  fInterval.row.classList.add('recur__interval');
+  fInterval.row.appendChild(intervalUnit);
+  details.appendChild(fInterval.row);
+
+  // Дни недели для «Еженедельно».
+  const daysRow = document.createElement('div');
+  daysRow.className = 'form__row recur__days';
+  const daysLabel = document.createElement('span');
+  daysLabel.className = 'form__label';
+  daysLabel.textContent = 'По дням';
+  daysRow.appendChild(daysLabel);
+  const dayBoxes = new Map();
+  for (const [code, label] of RECUR_WEEKDAYS) {
+    const chip = document.createElement('label');
+    chip.className = 'recur__day';
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.value = code;
+    chip.appendChild(cb);
+    chip.appendChild(document.createTextNode(label));
+    daysRow.appendChild(chip);
+    dayBoxes.set(code, cb);
+  }
+  details.appendChild(daysRow);
+
+  // Окончание серии: после N раз или до даты.
+  const fEndMode = selectRow('Завершить', [['count', 'После количества повторений'], ['until', 'В указанную дату']], 'count');
+  details.appendChild(fEndMode.row);
+  const fCount = inputRow('Количество повторений (вместе с первым)', 'number', '10');
+  fCount.input.min = '2'; fCount.input.step = '1';
+  details.appendChild(fCount.row);
+  const fUntil = inputRow('Повторять до (включительно)', 'date', '');
+  details.appendChild(fUntil.row);
+
+  const summary = document.createElement('div');
+  summary.className = 'form__meta recur__summary';
+  details.appendChild(summary);
+
+  let daysTouched = false;
+  for (const cb of dayBoxes.values()) cb.addEventListener('change', () => { daysTouched = true; refresh(); });
+
+  function getRule() {
+    return {
+      freq: fFreq.input.value,
+      interval: Math.floor(Number(fInterval.input.value)) || 0,
+      byDay: [...dayBoxes.values()].filter((cb) => cb.checked).map((cb) => cb.value),
+      endMode: fEndMode.input.value,
+      count: Math.floor(Number(fCount.input.value)) || 0,
+      until: fUntil.input.value ? new Date(fUntil.input.value + 'T00:00') : null,
+    };
+  }
+
+  function refresh() {
+    const freq = fFreq.input.value;
+    const start = new Date(startInput.value);
+    const end = new Date(endInput.value);
+    details.hidden = freq === 'none';
+    fInterval.row.hidden = freq === 'workdays';
+    daysRow.hidden = freq !== 'weekly';
+    fCount.row.hidden = fEndMode.input.value !== 'count';
+    fUntil.row.hidden = fEndMode.input.value !== 'until';
+    intervalUnit.textContent = { daily: 'дн.', weekly: 'нед.', monthly: 'мес.' }[freq] || '';
+
+    // По умолчанию — день недели начала; дата окончания — через месяц.
+    if (!isNaN(start)) {
+      if (!daysTouched) {
+        const code = weekdayCode(start);
+        for (const [c, cb] of dayBoxes) cb.checked = c === code;
+      }
+      if (!fUntil.input.value) fUntil.input.value = toDateInputValue(addDays(start, 30));
+    }
+
+    if (freq === 'none') return;
+    const rule = getRule();
+    try {
+      if (isNaN(start) || !(end > start)) throw new Error('Укажите начало и окончание');
+      validateRule(rule, start);
+      let text = describeRule(rule);
+      if (kind === 'task') {
+        const total = countOccurrences(rule, start, end);
+        const n = Math.min(total, RECUR_MAX_TASKS);
+        text += `. Будет создано задач: ${n}`;
+        if (total > RECUR_MAX_TASKS) text += ` (ограничение — не более ${RECUR_MAX_TASKS})`;
+      }
+      summary.textContent = '🔁 ' + text;
+      summary.classList.remove('recur__summary--error');
+    } catch (e) {
+      summary.textContent = e.message;
+      summary.classList.add('recur__summary--error');
+    }
+  }
+
+  for (const inp of [fFreq.input, fInterval.input, fEndMode.input, fCount.input, fUntil.input, startInput, endInput]) {
+    inp.addEventListener('input', refresh);
+    inp.addEventListener('change', refresh);
+  }
+  refresh();
+
+  return { row, getRule };
 }
 
 // --- Общие элементы формы -------------------------------------------------

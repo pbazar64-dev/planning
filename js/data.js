@@ -14,6 +14,7 @@ import {
   parseB24Date, toB24DateTime, weekRangeB24, secondsToHours, isToday,
   startOfDay, addDays,
 } from './dates.js';
+import { isRecurring, toB24RRule, expandOccurrences, describeB24RRule } from './recurrence.js';
 
 // --- Сотрудники -----------------------------------------------------------
 
@@ -192,9 +193,12 @@ function mapEvent(e, userId) {
   const accessibility = (e.ACCESSIBILITY || e.accessibility || '').toLowerCase();
   const isAbsence = accessibility === 'absent';
   const skipTime = (e.SKIP_TIME || e.skipTime) === 'Y';
+  // Повторяющиеся события приходят отдельными вхождениями с общим ID серии.
+  const rrule = e.RRULE || e.rrule || '';
+  const recurring = !!rrule && (typeof rrule !== 'object' || Object.keys(rrule).length > 0);
 
   return {
-    id: (isAbsence ? 'absence_' : 'event_') + (e.ID || e.id),
+    id: (isAbsence ? 'absence_' : 'event_') + (e.ID || e.id) + (recurring ? '_' + start.getTime() : ''),
     rawId: String(e.ID || e.id),
     kind: isAbsence ? 'absence' : 'event',
     userId,
@@ -204,6 +208,8 @@ function mapEvent(e, userId) {
     allDay: skipTime,
     status: null,
     hoursPlan: 0, hoursFact: 0, hoursToday: 0,
+    recurring,
+    recurrenceLabel: recurring ? describeB24RRule(rrule) : '',
     raw: e,
   };
 }
@@ -257,6 +263,10 @@ async function enrichTodayLogged(byUser) {
 // --- Создание и обновление сущностей --------------------------------------
 
 export async function createTask({ title, userId, description, start, end, hoursPlan }) {
+  return callMethod('tasks.task.add', { fields: taskFields({ title, userId, description, start, end, hoursPlan }) });
+}
+
+function taskFields({ title, userId, description, start, end, hoursPlan }) {
   const fields = {
     TITLE: title,
     RESPONSIBLE_ID: userId,
@@ -268,7 +278,30 @@ export async function createTask({ title, userId, description, start, end, hours
     fields.DEADLINE = toB24DateTime(end);
   }
   if (hoursPlan) fields.TIME_ESTIMATE = Math.round(Number(hoursPlan) * 3600);
-  return callMethod('tasks.task.add', { fields });
+  return fields;
+}
+
+// Серия повторяющихся задач: отдельная задача на каждое повторение,
+// создаются батчами по 50. Возвращает { created, failed }.
+export async function createTaskSeries(payload, rule) {
+  if (!isRecurring(rule)) {
+    await createTask(payload);
+    return { created: 1, failed: 0 };
+  }
+  const occurrences = expandOccurrences(rule, payload.start, payload.end);
+  let created = 0;
+  for (let i = 0; i < occurrences.length; i += 50) {
+    const calls = {};
+    occurrences.slice(i, i + 50).forEach((o, j) => {
+      calls['t_' + (i + j)] = {
+        method: 'tasks.task.add',
+        params: { fields: taskFields({ ...payload, start: o.start, end: o.end }) },
+      };
+    });
+    const results = await callBatch(calls);
+    created += Object.values(results).filter((r) => r != null).length;
+  }
+  return { created, failed: occurrences.length - created };
 }
 
 export async function updateTask(rawId, { title, description, start, end, hoursPlan, status }) {
@@ -309,8 +342,8 @@ export async function loadUserTasksForPick(userId) {
   }));
 }
 
-export async function createEvent({ name, userId, description, start, end, kind }) {
-  return callMethod('calendar.event.add', {
+export async function createEvent({ name, userId, description, start, end, kind, rule }) {
+  const params = {
     type: 'user',
     ownerId: userId,
     from: toB24DateTime(start),
@@ -318,7 +351,10 @@ export async function createEvent({ name, userId, description, start, end, kind 
     name,
     description: description || '',
     accessibility: kind === 'absence' ? 'absent' : 'busy',
-  });
+  };
+  // Повторение встреч и отсутствий — штатными средствами календаря.
+  if (isRecurring(rule)) params.rrule = toB24RRule(rule);
+  return callMethod('calendar.event.add', params);
 }
 
 export async function updateEvent(rawId, userId, { name, description, start, end, kind }) {

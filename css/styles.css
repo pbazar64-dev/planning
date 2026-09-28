@@ -286,6 +286,23 @@ body.is-loading .app-header__progress {
 }
 .form__loading { padding: 20px; text-align: center; color: var(--c-muted); }
 
+/* Повторение */
+.recur [hidden] { display: none !important; }
+.recur__details { margin-top: 8px; padding: 10px 12px; border: 1px dashed var(--c-line); border-radius: 8px; }
+.recur__interval { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.recur__interval .form__label { width: 100%; }
+.recur__interval .form__input { width: 90px; }
+.recur__unit { font-size: 13px; color: var(--c-muted); }
+.recur__days { display: flex; flex-wrap: wrap; gap: 6px; }
+.recur__days .form__label { width: 100%; }
+.recur__day {
+  display: inline-flex; align-items: center; gap: 4px; cursor: pointer;
+  border: 1px solid var(--c-line); border-radius: 16px; padding: 4px 10px; font-size: 13px;
+}
+.recur__day:has(input:checked) { background: #F0F7FF; border-color: var(--c-primary); }
+.recur__summary { margin: 0; }
+.recur__summary--error { color: #C62828; background: #FFEBEE; }
+
 /* Меню слота */
 .slot-menu { display: flex; flex-direction: column; gap: 8px; }
 .slot-menu__hint { font-size: 12px; color: var(--c-muted); margin-bottom: 4px; }
