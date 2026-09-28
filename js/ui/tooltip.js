@@ -24,6 +24,9 @@ function buildHtml(item) {
     ? 'весь день'
     : `${formatTime(item.start)}–${formatTime(item.end)}`;
   rows.push(`<div class="tooltip__row"><b>Время:</b> ${timeStr}</div>`);
+  if (item.recurring) {
+    rows.push(`<div class="tooltip__row"><b>Повтор:</b> 🔁 ${escapeHtml(item.recurrenceLabel || 'повторяется')}</div>`);
+  }
 
   if (item.kind === 'task' || item.kind === 'placement') {
     rows.push(`<div class="tooltip__row"><b>Часы:</b> ` +

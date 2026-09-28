@@ -90,10 +90,15 @@ export function toDateTimeInputValue(date) {
   return `${toDateInputValue(date)}T${formatTime(date)}`;
 }
 
-// Разбор значения Битрикс24 (ISO или «YYYY-MM-DD HH:MM:SS») в Date.
+// Разбор значения Битрикс24 (ISO, «YYYY-MM-DD HH:MM:SS» или формат портала
+// «DD.MM.YYYY[ HH:MM[:SS]]») в Date.
 export function parseB24Date(value) {
   if (!value) return null;
   if (value instanceof Date) return value;
+  const ru = /^(\d{2})\.(\d{2})\.(\d{4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?$/.exec(String(value).trim());
+  if (ru) {
+    return new Date(+ru[3], +ru[2] - 1, +ru[1], +(ru[4] || 0), +(ru[5] || 0), +(ru[6] || 0));
+  }
   // Битрикс часто отдаёт ISO со смещением — Date справляется.
   let d = new Date(value);
   if (!isNaN(d)) return d;

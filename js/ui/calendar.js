@@ -10,10 +10,10 @@ import {
   startOfDay, addDays, minutesFromGridStart,
 } from '../dates.js';
 import { showTooltip, moveTooltip, hideTooltip } from './tooltip.js';
-import { openSlotMenu, openEditModal } from './modals.js';
+import { openSlotMenu, openEditModal, removePlacementWithScope } from './modals.js';
 import {
-  updatePlacement, updateEvent, removePlacement, deleteEvent, deleteTask,
-  addPlacement, createEvent, taskUrl,
+  updatePlacement, updateEvent, deleteEvent, deleteTask,
+  addPlacement, createEvent, taskUrl, loadEventSeries,
 } from '../data.js';
 import { bus } from '../bus.js';
 import { showError, showToast } from './toast.js';
@@ -245,11 +245,13 @@ function buildBlock(g, day) {
       ? `<span class="cal-block__status" title="${item.status.label}">${item.status.icon}</span>`
       : '';
     meta.innerHTML = statusHtml +
-      `<span class="cal-block__hours">ф:${formatHM(item.secFact)}/п:${formatHM(item.secPlan)}/с:${formatHM(item.secToday)}</span>`;
+      `<span class="cal-block__hours">ф:${formatHM(item.secFact)}/п:${formatHM(item.secPlan)}/с:${formatHM(item.secToday)}</span>` +
+      (item.recurring ? '<span class="cal-block__repeat" title="Повторяется">🔁</span>' : '');
     content.appendChild(meta);
   } else {
     const meta = el('div', 'cal-block__meta');
-    meta.textContent = item.allDay ? 'весь день' : `${formatTime(item.start)}–${formatTime(item.end)}`;
+    meta.textContent = (item.recurring ? '🔁 ' : '') +
+      (item.allDay ? 'весь день' : `${formatTime(item.start)}–${formatTime(item.end)}`);
     content.appendChild(meta);
   }
   block.appendChild(content);
@@ -360,9 +362,13 @@ async function deleteBlock(item) {
   hideTooltip();
   try {
     if (item.kind === 'placement') {
-      await removePlacement(item.localId);
+      if (!(await removePlacementWithScope(item))) return;
     } else if (item.kind === 'event' || item.kind === 'absence') {
-      if (!window.confirm('Удалить это событие из Битрикс24?')) return;
+      // API календаря удаляет повторяющееся событие только целиком.
+      const q = item.recurring
+        ? `Событие повторяется (${item.recurrenceLabel.toLowerCase()}). Удалить ВСЮ серию из Битрикс24?`
+        : 'Удалить это событие из Битрикс24?';
+      if (!window.confirm(q)) return;
       await deleteEvent(item.rawId, item.userId);
     } else if (item.kind === 'task') {
       if (!window.confirm(`Удалить задачу «${item.title}» в Битрикс24? Действие необратимо.`)) return;
@@ -428,7 +434,19 @@ function startResize(edge, g, day, item, block, startY) {
     const { start, end } = pxToTimes(day, top, height);
     if (!(end > start)) { bus.reloadWeek(); return; }
     try {
-      if (item.kind === 'placement') {
+      if (item.recurring) {
+        // У серии меняем время всех вхождений: переносим новое время дня на
+        // дату начала серии.
+        const series = item.kind === 'placement'
+          ? { start: item.seriesStart }
+          : await loadEventSeries(item.rawId);
+        const s = new Date(series.start);
+        s.setHours(start.getHours(), start.getMinutes(), 0, 0);
+        const e = new Date(s.getTime() + (end - start));
+        if (item.kind === 'placement') await updatePlacement(item.localId, { start: s, end: e });
+        else await updateEvent(item.rawId, item.userId, { start: s, end: e, kind: item.kind });
+        showToast('Время изменено для всей серии', 'success');
+      } else if (item.kind === 'placement') {
         await updatePlacement(item.localId, { start, end });
       } else {
         await updateEvent(item.rawId, item.userId, { start, end, kind: item.kind });

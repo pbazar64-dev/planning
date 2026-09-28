@@ -15,7 +15,9 @@
   * /api/placements   -> ОБЩЕЕ для всех пользователей портала хранилище
     «размещений» задач на сетке (планирование). Лежит в файле на сервере
     приложения, поэтому видно всем, кто открывает приложение, а не только
-    автору (в отличие от localStorage в браузере);
+    автору (в отличие от localStorage в браузере). Размещение может
+    повторяться: поле ``rule`` (правило, разворачивается на фронтенде) и
+    ``exdates`` (убранные вхождения, даты YYYY-MM-DD);
   * /api/whoami       -> диагностика: видна ли сессия от шлюза.
 
 Только stdlib — на сервере есть лишь python3.
@@ -66,6 +68,24 @@ def _read_placements():
             return data if isinstance(data, list) else []
     except Exception:
         return []
+
+
+def _clean_rule(rule):
+    """Правило повторения размещения: словарь с частотой или None."""
+    if not isinstance(rule, dict) or rule.get("freq") in (None, "", "none"):
+        return None
+    return {
+        "freq": str(rule.get("freq")),
+        "interval": int(rule.get("interval") or 1),
+        "byDay": [str(d) for d in (rule.get("byDay") or [])][:7],
+        "endMode": str(rule.get("endMode") or "never"),
+        "count": int(rule.get("count") or 0),
+        "until": rule.get("until") or None,
+    }
+
+
+def _clean_exdates(v):
+    return sorted({str(d)[:10] for d in (v or []) if d})
 
 
 def _write_placements(arr):
@@ -166,6 +186,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     "userId": str(body.get("userId", "")),
                     "start": body.get("start"),
                     "end": body.get("end"),
+                    "rule": _clean_rule(body.get("rule")),
+                    "exdates": [],
                 }
                 with _lock:
                     arr = _read_placements()
@@ -185,6 +207,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                             p["start"] = body["start"]
                         if body.get("end"):
                             p["end"] = body["end"]
+                        if body.get("title"):
+                            p["title"] = body["title"]
+                        if "rule" in body:
+                            p["rule"] = _clean_rule(body.get("rule"))
+                            p["exdates"] = []  # новое правило — новая серия
+                        if "exdates" in body:
+                            p["exdates"] = _clean_exdates(body.get("exdates"))
                 _write_placements(arr)
             return self._send_json(200, {"success": True})
         if method == "DELETE":

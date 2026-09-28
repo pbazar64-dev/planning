@@ -14,6 +14,10 @@ import {
   parseB24Date, toB24DateTime, weekRangeB24, secondsToHours, isToday,
   startOfDay, addDays,
 } from './dates.js';
+import {
+  isRecurring, toB24RRule, parseB24RRule, expandOccurrences, describeB24RRule,
+  describeRule, ruleToJSON, ruleFromJSON,
+} from './recurrence.js';
 
 function asArray(data) {
   if (Array.isArray(data)) return data;
@@ -93,8 +97,9 @@ export async function loadWeekData(userIds, weekDate) {
   const placementList = [];
   for (const p of placements) {
     const items = byUser.get(String(p.userId));
-    if (items) {
-      const it = placementToItem(p);
+    if (!items) continue;
+    // Повторяющееся размещение разворачиваем во вхождения этой недели.
+    for (const it of placementItemsForWeek(p, range)) {
       items.push(it);
       placementList.push(it);
     }
@@ -208,9 +213,15 @@ function mapEvent(e, userId) {
   const accessibility = String(e.accessibility || e.ACCESSIBILITY || '').toLowerCase();
   const isAbsence = accessibility === 'absent';
   const skipTime = (e.skipTime || e.SKIP_TIME) === 'Y' || e.skipTime === true;
+  // Повторяющееся событие приходит строкой на каждое вхождение с общим id.
+  const rrule = eventRRule(e);
+  const recurring = !!rrule;
+  const occ = e.occurrenceIndex != null ? e.occurrenceIndex : start.getTime();
 
   return {
-    id: (isAbsence ? 'absence_' : 'event_') + (e.id || e.ID),
+    id: (isAbsence ? 'absence_' : 'event_') + (e.id || e.ID) + (recurring ? '_' + occ : ''),
+    recurring,
+    recurrenceLabel: recurring ? describeB24RRule(rrule) : '',
     rawId: String(e.id || e.ID),
     kind: isAbsence ? 'absence' : 'event',
     userId,
@@ -222,6 +233,34 @@ function mapEvent(e, userId) {
     hoursPlan: 0, hoursFact: 0, hoursToday: 0,
     raw: e,
   };
+}
+
+function eventRRule(e) {
+  const rr = e.rrule || e.RRULE || null;
+  if (!rr) return null;
+  if (typeof rr === 'object' && Object.keys(rr).length === 0) return null;
+  return rr;
+}
+
+// Исходное событие серии: начало/окончание первого вхождения и правило.
+export async function loadEventSeries(rawId) {
+  const data = await apiGet('/calendar-events/' + rawId);
+  const e = Array.isArray(data) ? data[0] : data;
+  if (!e) throw new Error('Событие не найдено в календаре');
+  const rrule = eventRRule(e);
+  return {
+    start: parseB24Date(e.from || e.dateFrom || e.DATE_FROM),
+    end: parseB24Date(e.to || e.dateTo || e.DATE_TO),
+    rule: rrule ? parseB24RRule(rrule) : null,
+    rrule,
+  };
+}
+
+// Правило для записи в событие. «Не повторять» у бывшей серии — одно
+// вхождение (COUNT: 1): так серия гарантированно сворачивается в разовое событие.
+function eventRRuleParam(rule, wasRecurring) {
+  if (isRecurring(rule)) return toB24RRule(rule);
+  return wasRecurring ? { FREQ: 'DAILY', INTERVAL: 1, COUNT: 1 } : undefined;
 }
 
 // --- Создание и обновление сущностей --------------------------------------
@@ -268,7 +307,8 @@ export async function loadPlacements() {
   }
 }
 
-export async function addPlacement({ taskId, title, userId, start, end }) {
+// rule — правило повторения (необязательно): одна задача, много ячеек.
+export async function addPlacement({ taskId, title, userId, start, end, rule }) {
   await bffRequest('/placements', {
     method: 'POST',
     body: {
@@ -277,15 +317,32 @@ export async function addPlacement({ taskId, title, userId, start, end }) {
       userId: String(userId),
       start: start.toISOString(),
       end: end.toISOString(),
+      rule: ruleToJSON(rule),
     },
   });
 }
 
-export async function updatePlacement(id, { start, end }) {
+// rule: undefined — не менять; null/«не повторять» — убрать повторение.
+// exdates — полный список убранных вхождений (YYYY-MM-DD).
+export async function updatePlacement(id, { start, end, rule, exdates }) {
   const body = {};
   if (start) body.start = start.toISOString();
   if (end) body.end = end.toISOString();
+  if (rule !== undefined) body.rule = ruleToJSON(rule);
+  if (exdates !== undefined) body.exdates = exdates;
   await bffRequest('/placements/' + encodeURIComponent(id), { method: 'PATCH', body });
+}
+
+// Убрать из серии одно вхождение (остальные остаются).
+export async function removePlacementOccurrence(item) {
+  const day = toDateKey(item.start);
+  const exdates = [...new Set([...(item.exdates || []), day])];
+  await updatePlacement(item.localId, { exdates });
+}
+
+function toDateKey(d) {
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
 }
 
 export async function removePlacement(id) {
@@ -335,18 +392,36 @@ export async function migrateLocalPlacements() {
   try { localStorage.removeItem('planner_task_placements'); } catch (e) { /* ignore */ }
 }
 
-// Размещение -> item для рендера календаря.
-function placementToItem(p) {
+// Повторяющееся размещение -> вхождения недели (с учётом убранных дат).
+function placementItemsForWeek(p, range) {
+  const start = new Date(p.start);
+  const end = new Date(p.end);
+  const rule = ruleFromJSON(p.rule);
+  if (!rule) return [placementToItem(p, start, end)];
+  const exdates = new Set(p.exdates || []);
+  return expandOccurrences(rule, start, end, { from: range.fromDate, to: addDays(range.fromDate, 7) })
+    .filter((o) => !exdates.has(toDateKey(o.start)))
+    .map((o) => placementToItem(p, o.start, o.end, rule));
+}
+
+// Размещение (или его вхождение) -> item для рендера календаря.
+function placementToItem(p, start = new Date(p.start), end = new Date(p.end), rule = null) {
   return {
-    id: 'place_' + p.id,
+    id: 'place_' + p.id + (rule ? '_' + start.getTime() : ''),
+    recurring: !!rule,
+    rule,
+    recurrenceLabel: rule ? describeRule(rule) : '',
+    seriesStart: new Date(p.start),
+    seriesEnd: new Date(p.end),
+    exdates: p.exdates || [],
     localId: p.id,
     kind: 'placement',
     userId: String(p.userId),
     taskId: p.taskId,
     title: p.title,
     description: '',
-    start: new Date(p.start),
-    end: new Date(p.end),
+    start,
+    end,
     allDay: false,
     status: null,
     hoursPlan: 0, hoursFact: 0, hoursToday: 0,
@@ -374,7 +449,7 @@ export async function loadUserTasksForPick(userId) {
     }));
 }
 
-export async function createEvent({ name, userId, description, start, end, kind }) {
+export async function createEvent({ name, userId, description, start, end, kind, rule }) {
   // Обёртка вызывает calendar.event.add — ему обязательны from/to (а не
   // dateFrom/dateTo). Шлём оба варианта для совместимости.
   const from = toB24DateTime(start);
@@ -386,16 +461,22 @@ export async function createEvent({ name, userId, description, start, end, kind 
     description: description || '',
     from, to, dateFrom: from, dateTo: to,
     accessibility: kind === 'absence' ? 'absent' : 'busy',
+    ...(isRecurring(rule) ? { rrule: toB24RRule(rule) } : {}),
   });
 }
 
-export async function updateEvent(rawId, userId, { name, description, start, end, kind }) {
+// rule: undefined — повторение не трогаем; иначе задаём (или сворачиваем серию).
+export async function updateEvent(rawId, userId, { name, description, start, end, kind, rule, wasRecurring }) {
   const body = { type: 'user', ownerId: userId };
   if (name != null) body.name = name;
   if (description != null) body.description = description;
   if (start) { const f = toB24DateTime(start); body.from = f; body.dateFrom = f; }
   if (end) { const t = toB24DateTime(end); body.to = t; body.dateTo = t; }
   if (kind) body.accessibility = kind === 'absence' ? 'absent' : 'busy';
+  if (rule !== undefined) {
+    const rr = eventRRuleParam(rule, wasRecurring);
+    if (rr) body.rrule = rr;
+  }
   return apiSend('/calendar-events/' + rawId, 'PATCH', body);
 }
 
