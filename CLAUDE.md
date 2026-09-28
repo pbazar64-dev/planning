@@ -61,7 +61,9 @@ Vibecode встраивает приложения по **BFF-схеме**, а �
 ## Как деплоить
 
 Нужны `node`, `python3`, `curl` и переменная окружения `VIBE_APP_KEY`
-(ключ приложения `vibe_app_local_...`).
+(ключ приложения `vibe_app_local_...`). В облачном окружении Claude Code ключ
+задан как `VIBE_API_KEY_PLAN` — `scripts/env.sh` подхватывает его сам, а запуск
+`sh scripts/deploy.sh` разрешён правилом в `.claude/settings.json`.
 
 ```
 export VIBE_APP_KEY='vibe_app_local_...'   # секрет, см. раздел «Секреты»

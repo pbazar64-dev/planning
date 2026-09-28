@@ -10,8 +10,12 @@ export APP_URL="https://app-13995b2c41ce.vibecode.bitrix24.tech"
 export GATEWAY="https://vibecode.bitrix24.tech"
 export PORTAL="avrika.bitrix24.ru"
 
+# В облачном окружении Claude Code ключ хранится в VIBE_API_KEY_PLAN.
+[ -z "$VIBE_APP_KEY" ] && [ -n "$VIBE_API_KEY_PLAN" ] && export VIBE_APP_KEY="$VIBE_API_KEY_PLAN"
+
 if [ -z "$VIBE_APP_KEY" ]; then
   echo "ERROR: не задана переменная VIBE_APP_KEY (ключ приложения vibe_app_*)." >&2
   echo "Задайте её перед запуском:  export VIBE_APP_KEY='vibe_app_local_...'" >&2
+  echo "(или переменную окружения VIBE_API_KEY_PLAN)" >&2
   return 1 2>/dev/null || exit 1
 fi
